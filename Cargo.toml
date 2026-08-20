@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = ["struum_network",
     "struum_opengl",
     "struum_types",
 ]
