@@ -1,6 +1,5 @@
 use struum_opengl::OpenglBackend;
 use struum_types::{
-    StruumError,
     BufferRole,
     Buffer,
 };
@@ -10,24 +9,32 @@ fn main() {
     let shader = r#"
         #version 430
 
-        layout(local_size_x = 1) in;
+        layout(local_size_x = 3) in;
 
-        layout(std430, binding = 0) buffer Data {
-            float values[];
+        layout(std430, binding = 0) buffer Input {
+            float x[];
         };
 
-        void main()
-        {
+        layout(std430, binding = 1) buffer Output {
+            float y[];
+        };
+
+        void main() {
             uint i = gl_GlobalInvocationID.x;
-            values[i] *= 2.0;
+            y[i] = x[i] * 2.0;
         }
     "#;
 
+    let input: [f32; 3] = [1.0, 2.0, 3.0];
     let buffers = vec![
-        Buffer::new(BufferRole::Input, vec![1,2,3]),
+        Buffer::new(BufferRole::Input, &input),
+        Buffer::empty::<f32>(BufferRole::Output, 3),
     ];
 
-
     let backend = OpenglBackend::new().unwrap();
-    backend.execute(shader, &buffers).unwrap();
+    let output = backend.execute(shader, &buffers).unwrap();
+
+    for out in output {
+        println!("{:#?}", out.as_slice::<f32>());
+    }
 }
