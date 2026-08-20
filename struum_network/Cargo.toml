@@ -7,3 +7,4 @@ edition = "2024"
 tokio = { version = "1.53.1", features = ["net"] }
 struum_types = { workspace = true }
 serde = "1.0.229"
+bincode = "1.3"
