@@ -1,8 +1,13 @@
 mod gl_context;
-use gl_context::GlContext;
+mod shader;
 
-use struum_types::StruumError;
-use struum_types::Buffer;
+use gl_context::GlContext;
+use shader::Shader;
+
+use struum_types::{
+    StruumError,
+    Buffer,
+};
 
 pub struct OpenglBackend {
   _context: GlContext,
@@ -16,7 +21,9 @@ impl OpenglBackend {
         })
     }
 
-    pub fn execute(shader: String, buffers: Vec<Buffer>) -> Vec<Buffer> {
-        buffers
+    pub fn execute(&self, shader: &str, buffers: &Vec<Buffer>) -> Result<Vec<Buffer>, StruumError> {
+        let shader = Shader::new(shader)?;
+        println!("{:#?}", shader);
+        Ok(buffers.to_vec())
     }
 }
