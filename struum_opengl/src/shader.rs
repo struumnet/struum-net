@@ -1,10 +1,9 @@
 use std::ffi::{c_void, CString};
-use gl::types::GLuint;
 use struum_types::StruumError;
 
 #[derive(Debug)]
 pub(crate) struct Shader {
-    id: GLuint,
+    id: u32,
 }
 
 impl Shader {
@@ -21,7 +20,18 @@ impl Shader {
         })
     }
 
-    fn compile_shader(shader: GLuint, src: &str) -> Result<(), StruumError> {
+    pub(crate) fn dispatch_and_wait(&self, x: u32, y: u32, z: u32) {
+        unsafe {
+            gl::UseProgram(self.id);
+
+            gl::DispatchCompute(x, y, z);
+
+            // Wait for shader writes to finish
+            gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT);
+        }
+    }
+
+    fn compile_shader(shader: u32, src: &str) -> Result<(), StruumError> {
         let source = CString::new(src)
             .map_err(|e| StruumError::ShaderCreationError(e.to_string()))?;
 
@@ -74,7 +84,7 @@ impl Shader {
         Ok(())
     }
 
-    fn create_program(shader: GLuint) -> Result<GLuint, StruumError> {
+    fn create_program(shader: u32) -> Result<u32, StruumError> {
         unsafe {
             // Create program
             let program = gl::CreateProgram();
@@ -121,5 +131,10 @@ impl Shader {
 
             Ok(program)
         }
+    }
+}
+
+impl Drop for Shader {
+    fn drop(&mut self) {
     }
 }
