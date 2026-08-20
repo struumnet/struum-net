@@ -1,28 +1,22 @@
-#[derive(Debug, Clone, Copy)]
-pub enum BufferRole {
-    Input,
-    Output,
-}
-
 #[derive(Debug, Clone)]
 pub struct Buffer {
-    pub role: BufferRole,
+    pub name: String,
     pub data: Vec<u8>,
     pub stride: usize,
 }
 
 impl Buffer {
-    pub fn new<T: bytemuck::Pod>(role: BufferRole, data: &[T]) -> Self {
+    pub fn new<T: bytemuck::Pod>(name: &str, data: &[T]) -> Self {
         Self {
-            role: role,
+            name: name.to_string(),
             data: bytemuck::cast_slice(data).to_vec(),
             stride: std::mem::size_of::<T>(),
         }
     }
 
-    pub fn empty<T: bytemuck::Pod>(role: BufferRole, count: usize) -> Self {
+    pub fn empty<T: bytemuck::Pod>(name: &str, count: usize) -> Self {
         Self {
-            role: role,
+            name: name.to_string(),
             data: vec![0u8; count * std::mem::size_of::<T>()],
             stride: std::mem::size_of::<T>(),
         }

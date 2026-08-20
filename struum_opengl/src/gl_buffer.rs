@@ -1,9 +1,11 @@
 use std::ffi::c_void;
-use struum_types::Buffer;
+use struum_types::{StruumError, Buffer};
 
 pub(crate) struct GlBuffer {
-    id: u32,
-    size: usize,
+    pub name: String,
+    pub id: u32,
+    pub size: usize,
+    pub stride: usize,
 }
 
 impl GlBuffer {
@@ -32,8 +34,10 @@ impl GlBuffer {
         }
 
         Self {
+            name: buffer.name.clone(),
             id: id,
             size: buffer.data.len(),
+            stride: buffer.stride,
         }
     }
 
@@ -60,6 +64,35 @@ impl GlBuffer {
         }
 
         data
+    }
+
+    pub(crate) fn write(&mut self, data: &[u8]) -> Result<(), StruumError> {
+        if data.len() > self.size {
+            return Err(StruumError::BufferWriteError(
+                "data is larger than the allocated GPU buffer".to_string()
+            ));
+        }
+
+        unsafe {
+            gl::BindBuffer(
+                gl::SHADER_STORAGE_BUFFER,
+                self.id,
+            );
+
+            gl::BufferSubData(
+                gl::SHADER_STORAGE_BUFFER,
+                0,
+                data.len() as isize,
+                data.as_ptr() as *const c_void,
+            );
+
+            gl::BindBuffer(
+                gl::SHADER_STORAGE_BUFFER,
+                0,
+            );
+        }
+
+        Ok(())
     }
 
     pub(crate) fn bind(&self, binding: u32) {
