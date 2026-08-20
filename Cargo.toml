@@ -10,6 +10,10 @@ name = "struum-net"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 struum_opengl = {path = "./struum_opengl"}
 struum_types = {path = "./struum_types"}
+
+[dependencies]
+struum_opengl = { workspace = true }
+struum_types = { workspace = true }
