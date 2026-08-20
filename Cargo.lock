@@ -114,6 +114,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1031,6 +1040,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "struum-net"
 version = "0.1.0"
 dependencies = [
+ "struum_network",
  "struum_opengl",
  "struum_types",
 ]
@@ -1039,6 +1049,7 @@ dependencies = [
 name = "struum_network"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "serde",
  "struum_types",
  "tokio",
@@ -1059,6 +1070,8 @@ name = "struum_types"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]

@@ -4,8 +4,5 @@ pub enum StruumError {
     ShaderCreationError(String),
     BufferWriteError(String),
     NotFound(String),
-<<<<<<< HEAD
     NetworkConnectionError(String),
-=======
->>>>>>> 7178db7 (fix: + Made shader compilation only once)
 }
