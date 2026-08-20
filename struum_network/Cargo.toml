@@ -1,0 +1,9 @@
+[package]
+name = "struum_network"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.53.1", features = ["net"] }
+struum_types = { workspace = true }
+serde = "1.0.229"
