@@ -1,6 +1,6 @@
 use std::net::UdpSocket;
 use struum_types::StruumError;
-use struum_types::network::UID;
+use struum_types::network::{HelloPacket, UID};
 
 pub struct Worker {
     pub id: UID,
@@ -13,7 +13,8 @@ impl Worker {
     pub fn notify_network(&mut self) -> Result<(), StruumError> {
         let socket = UdpSocket::bind("0.0.0.0:0");
         if let Ok(socket) = socket {
-            let mut buf = [0; 10];
+            let data = HelloPacket{};
+            let mut buf = bincode::serialize(&data);
             socket
                 .set_broadcast(true)
                 .map_err(|_| StruumError::NetworkConnectionError("Couldn't enable broadcast!"))?;
