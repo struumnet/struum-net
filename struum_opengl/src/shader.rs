@@ -1,4 +1,4 @@
-use std::ffi::{c_void, CString};
+use std::ffi::CString;
 use struum_types::StruumError;
 
 #[derive(Debug)]
@@ -136,5 +136,8 @@ impl Shader {
 
 impl Drop for Shader {
     fn drop(&mut self) {
+        unsafe {
+            gl::DeleteProgram(self.id);
+        }
     }
 }

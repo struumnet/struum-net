@@ -3,4 +3,4 @@ mod buffer;
 pub mod network;
 
 pub use struum_error::StruumError;
-pub use buffer::{BufferRole, Buffer};
+pub use buffer::Buffer;
