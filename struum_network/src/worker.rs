@@ -17,17 +17,17 @@ impl Worker {
             let mut buf = bincode::serialize(&data).map_err(|_| StruumError::NetworkConnectionError("Failed to serialize packet!"))?;
             socket
                 .set_broadcast(true)
-                .map_err(|_| StruumError::NetworkConnectionError("Couldn't enable broadcast!"))?;
+                .map_err(|_| StruumError::NetworkConnectionError("Couldn't enable broadcast!".to_string()))?;
 
             socket
                 .send_to(&mut buf, format!("255.255.255.255:{}",PORT))
                 .map_err(|_| {
-                    StruumError::NetworkConnectionError("Couldn't receive a broadcast connection!")
+                    StruumError::NetworkConnectionError("Couldn't receive a broadcast connection!".to_string())
                 })?;
 
             Ok(())
         } else {
-            Err(StruumError::NetworkConnectionError("Failed to broadcast!"))
+            Err(StruumError::NetworkConnectionError("Failed to broadcast!".to_string()))
         }
     }
     pub fn listen(&self) -> Result<(), StruumError> {
@@ -38,13 +38,13 @@ impl Worker {
             let (amt,src) = socket
                 .recv_from(&mut buf)
                 .map_err(|_| {
-                    StruumError::NetworkConnectionError("Couldn't receive a broadcast connection!")
+                    StruumError::NetworkConnectionError("Couldn't receive a broadcast connection!".to_string())
                 })?;
             let message = &buf[..amt];
             println!("Received {:?} from {:?}", message, src);
             Ok(())
         } else {
-            Err(StruumError::NetworkConnectionError("Failed to broadcast!"))
+            Err(StruumError::NetworkConnectionError("Failed to broadcast!".to_string()))
         }
     }
 }

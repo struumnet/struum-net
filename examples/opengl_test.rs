@@ -1,9 +1,5 @@
 use struum_opengl::OpenglBackend;
-use struum_types::{
-    BufferRole,
-    Buffer,
-};
-
+use struum_types::Buffer;
 
 fn main() {
     let shader = r#"
@@ -27,14 +23,13 @@ fn main() {
 
     let input: [f32; 3] = [1.0, 2.0, 3.0];
     let buffers = vec![
-        Buffer::new(BufferRole::Input, &input),
-        Buffer::empty::<f32>(BufferRole::Output, 3),
+        Buffer::new("x", &input),
+        Buffer::empty::<f32>("y", 3),
     ];
 
-    let backend = OpenglBackend::new().unwrap();
-    let output = backend.execute(shader, &buffers).unwrap();
+    let mut backend = OpenglBackend::new(shader, &buffers).unwrap();
+    backend.execute();
 
-    for out in output {
-        println!("{:#?}", out.as_slice::<f32>());
-    }
+    let out = backend.read_buffer::<f32>("y").unwrap();
+    println!("{:#?}", out);
 }

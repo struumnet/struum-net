@@ -1,6 +1,8 @@
 #[derive(Debug)]
-pub enum StruumError<'a> {
-    NetworkConnectionError(&'a str),
-    GlContextCreationError(&'a str),
-    ShaderCreationError(&'a str),
+pub enum StruumError {
+    GlContextCreationError(String),
+    ShaderCreationError(String),
+    BufferWriteError(String),
+    NotFound(String),
+    NetworkConnectionError(String),
 }
