@@ -1,3 +1,9 @@
+[workspace]
+members = [
+    "struum-net",
+    "struum_opengl",
+    "struum_types",
+]
 [package]
 name = "struum-net"
 version = "0.1.0"
