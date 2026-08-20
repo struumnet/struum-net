@@ -14,7 +14,7 @@ impl Worker {
         let socket = UdpSocket::bind("0.0.0.0:0");
         if let Ok(socket) = socket {
             let data = HelloPacket{};
-            let mut buf = bincode::serialize(&data);
+            let mut buf = bincode::serialize(&data).map_err(|_| StruumError::NetworkConnectionError("Failed to serialize packet!"))?;
             socket
                 .set_broadcast(true)
                 .map_err(|_| StruumError::NetworkConnectionError("Couldn't enable broadcast!"))?;
