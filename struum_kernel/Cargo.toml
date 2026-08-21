@@ -1,0 +1,10 @@
+[package]
+name = "struum_kernel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+struum_types = { workspace = true }
+struum_macros = { workspace = true }
+syn = "3.0.3"
+regex = "1.13.1"
