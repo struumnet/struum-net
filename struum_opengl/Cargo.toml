@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 struum_types = { workspace = true }
+struum_kernel = { workspace = true }
 bytemuck = { workspace = true }
 gl = { workspace = true }
 glfw = { workspace = true }

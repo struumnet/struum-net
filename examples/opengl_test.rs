@@ -24,7 +24,7 @@ fn main() {
     let input: [f32; 3] = [1.0, 2.0, 3.0];
     let buffers = vec![Buffer::new("x", &input), Buffer::empty::<f32>("y", 3)];
 
-    let mut backend = OpenglBackend::new(shader, &buffers).unwrap();
+    let mut backend = OpenglBackend::new(shader, &buffers, 1).unwrap();
     backend.execute();
 
     let out = backend.read_buffer::<f32>("y").unwrap();

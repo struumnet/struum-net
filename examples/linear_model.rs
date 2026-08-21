@@ -77,7 +77,7 @@ fn main() {
         Buffer::new("y", &y),
     ];
 
-    let mut backend = OpenglBackend::new(shader, &buffers).unwrap();
+    let mut backend = OpenglBackend::new(shader, &buffers, 1).unwrap();
 
     for iteration in 0..1000 {
         backend.execute();
