@@ -1,5 +1,7 @@
 [workspace]
-members = ["struum_coordinator","struum_node",
+members = [
+    "struum_coordinator",
+    "struum_node",
     "struum_network",
     "struum_opengl",
     "struum_types",
@@ -22,3 +24,5 @@ struum_coordinator = {path = "./struum_coordinator"}
 struum_opengl = { workspace = true }
 struum_types = { workspace = true }
 struum_network = { workspace = true }
+struum_node  = { workspace = true }
+tokio = { version = "1.53.1", features = ["full"] }

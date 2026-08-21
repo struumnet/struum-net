@@ -1,6 +1,6 @@
-mod struum_error;
-mod buffer;
+pub mod buffer;
 pub mod network;
+pub mod struum_error;
 
-pub use struum_error::StruumError;
 pub use buffer::Buffer;
+pub use struum_error::StruumError;

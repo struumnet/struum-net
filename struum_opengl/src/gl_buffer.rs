@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use struum_types::{StruumError, Buffer};
+use struum_types::{Buffer, StruumError};
 
 pub(crate) struct GlBuffer {
     pub name: String,
@@ -15,10 +15,7 @@ impl GlBuffer {
         unsafe {
             gl::GenBuffers(1, &mut id);
 
-            gl::BindBuffer(
-                gl::SHADER_STORAGE_BUFFER,
-                id,
-            );
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, id);
 
             gl::BufferData(
                 gl::SHADER_STORAGE_BUFFER,
@@ -27,10 +24,7 @@ impl GlBuffer {
                 gl::DYNAMIC_COPY,
             );
 
-            gl::BindBuffer(
-                gl::SHADER_STORAGE_BUFFER,
-                0,
-            );
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
         }
 
         Self {
@@ -45,10 +39,7 @@ impl GlBuffer {
         let mut data = vec![0u8; self.size];
 
         unsafe {
-            gl::BindBuffer(
-                gl::SHADER_STORAGE_BUFFER,
-                self.id,
-            );
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.id);
 
             gl::GetBufferSubData(
                 gl::SHADER_STORAGE_BUFFER,
@@ -57,10 +48,7 @@ impl GlBuffer {
                 data.as_mut_ptr() as *mut c_void,
             );
 
-            gl::BindBuffer(
-                gl::SHADER_STORAGE_BUFFER,
-                0,
-            );
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
         }
 
         data
@@ -69,15 +57,12 @@ impl GlBuffer {
     pub(crate) fn write(&mut self, data: &[u8]) -> Result<(), StruumError> {
         if data.len() > self.size {
             return Err(StruumError::BufferWriteError(
-                "data is larger than the allocated GPU buffer".to_string()
+                "data is larger than the allocated GPU buffer".to_string(),
             ));
         }
 
         unsafe {
-            gl::BindBuffer(
-                gl::SHADER_STORAGE_BUFFER,
-                self.id,
-            );
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.id);
 
             gl::BufferSubData(
                 gl::SHADER_STORAGE_BUFFER,
@@ -86,10 +71,7 @@ impl GlBuffer {
                 data.as_ptr() as *const c_void,
             );
 
-            gl::BindBuffer(
-                gl::SHADER_STORAGE_BUFFER,
-                0,
-            );
+            gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
         }
 
         Ok(())
@@ -97,11 +79,7 @@ impl GlBuffer {
 
     pub(crate) fn bind(&self, binding: u32) {
         unsafe {
-            gl::BindBufferBase(
-                gl::SHADER_STORAGE_BUFFER,
-                binding,
-                self.id,
-            );
+            gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, binding, self.id);
         }
     }
 }

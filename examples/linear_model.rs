@@ -63,14 +63,9 @@ fn main() {
     //
     // y = 2x + 1
     //
-    let x: Vec<f32> = (0..5)
-        .map(|i| i as f32)
-        .collect();
+    let x: Vec<f32> = (0..5).map(|i| i as f32).collect();
 
-    let y: Vec<f32> = x
-        .iter()
-        .map(|&x| 2.0 * x + 1.0)
-        .collect();
+    let y: Vec<f32> = x.iter().map(|&x| 2.0 * x + 1.0).collect();
 
     // Initial model:
     //

@@ -1,5 +1,5 @@
-use std::ffi::c_void;
 use glfw::Context;
+use std::ffi::c_void;
 use struum_types::StruumError;
 
 pub(crate) struct GlContext {
@@ -16,13 +16,9 @@ impl GlContext {
         glfw.window_hint(glfw::WindowHint::Visible(false));
 
         let (mut window, _) = glfw
-            .create_window(
-                640, 480,
-                "struum-opengl",
-                glfw::WindowMode::Windowed
-            )
+            .create_window(640, 480, "struum-opengl", glfw::WindowMode::Windowed)
             .ok_or(StruumError::GlContextCreationError(
-                "Failed to create glfw window".to_string()
+                "Failed to create glfw window".to_string(),
             ))?;
         window.make_current();
 

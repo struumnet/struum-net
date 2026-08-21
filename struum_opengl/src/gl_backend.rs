@@ -1,13 +1,10 @@
+use crate::gl_buffer::GlBuffer;
 use crate::gl_context::GlContext;
 use crate::shader::Shader;
-use crate::gl_buffer::GlBuffer;
 
 use std::collections::HashMap;
 
-use struum_types::{
-    StruumError,
-    Buffer,
-};
+use struum_types::{Buffer, StruumError};
 
 pub struct OpenglBackend {
     shader: Shader,
@@ -39,7 +36,6 @@ impl OpenglBackend {
     }
 
     pub fn execute(&self) {
-
         // TODO(slok): Determine dispatch size.
         // (input_count + invocation_count - 1) / invocation_count
         self.shader.dispatch_and_wait(1, 1, 1);
@@ -49,24 +45,23 @@ impl OpenglBackend {
         let gl_buffer = self
             .gl_buffers
             .get_mut(buffer_name)
-            .ok_or_else(|| {
-                StruumError::NotFound(buffer_name.to_string())
-            })?;
+            .ok_or_else(|| StruumError::NotFound(buffer_name.to_string()))?;
 
         gl_buffer.write(&buffer.data)?;
 
         Ok(())
     }
 
-    pub fn read_buffer<T: bytemuck::Pod>(&mut self, buffer_name: &str) -> Result<Vec<T>, StruumError> {
+    pub fn read_buffer<T: bytemuck::Pod>(
+        &mut self,
+        buffer_name: &str,
+    ) -> Result<Vec<T>, StruumError> {
         let gl_buffer = self
             .gl_buffers
             .get_mut(buffer_name)
-            .ok_or_else(|| {
-                StruumError::NotFound(buffer_name.to_string())
-            })?;
+            .ok_or_else(|| StruumError::NotFound(buffer_name.to_string()))?;
 
-            let data = gl_buffer.read();
+        let data = gl_buffer.read();
 
         Ok(bytemuck::cast_slice(&data).to_vec())
     }

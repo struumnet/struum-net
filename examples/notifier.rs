@@ -1,6 +1,6 @@
-pub mod node;
 use struum_network::layer::NetworkLayer;
 use struum_types::network::*;
+use struum_node::node;
 
 
 #[tokio::main]
