@@ -78,13 +78,18 @@ impl OpenglBackend {
         self.shader.dispatch_and_wait(self.group_size, 1, 1);
     }
 
-    pub fn update(&mut self, buffer_name: &str, buffer: &Buffer) -> Result<(), StruumError> {
+    pub fn write_buffer<T: bytemuck::Pod>(
+        &mut self,
+        buffer_name: &str,
+        data: &[T]
+    ) -> Result<(), StruumError> {
         let gl_buffer = self
             .gl_buffers
             .get_mut(buffer_name)
             .ok_or_else(|| StruumError::NotFound(buffer_name.to_string()))?;
 
-        gl_buffer.write(&buffer.data)?;
+        let data = bytemuck::cast_slice(data);
+        gl_buffer.write(data)?;
 
         Ok(())
     }

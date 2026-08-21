@@ -1,5 +1,5 @@
 use regex::Regex;
-use struum_types::{Buffer, GPUType, StruumError};
+use struum_types::{Buffer, GPUType, StruumError, is_builtin_gpu_type};
 
 // TODO(slok): Support multiple backend types
 
@@ -20,6 +20,7 @@ pub struct Kernel {
 
     local_size: u32,
     work_buffer: Option<String>,
+    work_count: Option<u32>,
     group_size: Option<u32>,
     gpu_source: Option<String>,
 }
@@ -32,6 +33,7 @@ impl Kernel {
             buffer_bindings: Vec::new(),
             local_size: 256,
             work_buffer: None,
+            work_count: None,
             group_size: None,
             gpu_source: None,
         }
@@ -51,9 +53,13 @@ impl Kernel {
 
     pub fn pack(&mut self) -> Result<(), StruumError> {
         self.compute_group_size()?;
-        self.generate_glsl();
+        self.generate_glsl()?;
 
         Ok(())
+    }
+
+    pub fn get_work_count(&self) -> Option<u32> {
+        self.work_count
     }
 
     pub fn get_group_size(&self) -> Option<u32> {
@@ -81,12 +87,15 @@ impl Kernel {
             .ok_or(StruumError::NotFound("Work Buffer not found".to_string()))?;
 
         let count = binding.buffer.actual_len();
-        self.group_size = Some((count as u32 + self.local_size - 1) / self.local_size);
+        self.work_count = Some(count as u32);
+        self.group_size = Some(
+            (count as u32 + self.local_size - 1) / self.local_size
+        );
 
         Ok(())
     }
 
-    fn generate_glsl(&mut self) {
+    fn generate_glsl(&mut self) -> Result<(), StruumError> {
         let mut source = String::new();
 
         source.push_str("#version 430\n\n");
@@ -127,7 +136,14 @@ impl Kernel {
 
         // Generate main()
         source.push_str(&format!(
-            "void main() {{\n    uint id = gl_GlobalInvocationID.x;\n    {}(id);\n}}\n",
+            r#"
+void main() {{
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= {}) return;
+    {}(id);
+}}"#,
+            self.work_count
+                .ok_or(StruumError::NotFound("Work Count Empty".to_string()))?,
             self.entry_point
         ));
 
@@ -137,6 +153,8 @@ impl Kernel {
         source = self.mangle_source(&source);
 
         self.gpu_source = Some(source);
+
+        Ok(())
     }
 
     fn mangle_source(&self, source: &str) -> String {
@@ -151,22 +169,49 @@ impl Kernel {
         }
 
         for binding in &self.buffer_bindings {
-            mangled = Self::mangle_identifier(
-                &mangled,
-                &binding.gpu_type,
-                &format!("_struum_{}", binding.gpu_type),
-            );
+            // Donot mangle the primitive types
+            if !is_builtin_gpu_type(&binding.gpu_type) {
+                mangled = Self::mangle_identifier(
+                    &mangled,
+                    &binding.gpu_type,
+                    &format!("_struum_{}", binding.gpu_type),
+                );
+            }
         }
 
         mangled
     }
 
-    fn mangle_identifier(source: &str, original: &str, mangled: &str) -> String {
-        let pattern = format!(r"\b{}\b", regex::escape(original));
+    fn mangle_identifier(
+        source: &str,
+        identifier: &str,
+        replacement: &str,
+    ) -> String {
+        let re = regex::Regex::new(
+            &format!(r"\b{}\b", regex::escape(identifier))
+        ).unwrap();
 
-        Regex::new(&pattern)
-            .unwrap()
-            .replace_all(source, mangled)
-            .into_owned()
+        let mut result = String::new();
+        let mut last = 0;
+
+        for m in re.find_iter(source) {
+            // Don't replace if this identifier is preceded by '.'
+            if m.start() > 0 {
+                let previous = source.as_bytes()[m.start() - 1];
+
+                if previous == b'.' {
+                    continue;
+                }
+            }
+
+            result.push_str(&source[last..m.start()]);
+            result.push_str(replacement);
+
+            last = m.end();
+        }
+
+        result.push_str(&source[last..]);
+
+        result
     }
 }

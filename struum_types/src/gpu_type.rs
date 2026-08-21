@@ -1,6 +1,19 @@
+// TODO(slok): Implement other gpu types like vecs
+
 pub trait GPUType {
     fn glsl() -> String;
     fn glsl_type() -> &'static str;
+}
+
+pub fn is_builtin_gpu_type(name: &str) -> bool {
+    matches!(
+        name,
+        "float"
+            | "double"
+            | "int"
+            | "uint"
+            | "bool"
+    )
 }
 
 impl GPUType for f32 {
