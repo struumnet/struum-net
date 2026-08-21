@@ -5,4 +5,5 @@ pub enum StruumError {
     BufferWriteError(String),
     NotFound(String),
     NetworkConnectionError(String),
+    SerializationError(String),
 }

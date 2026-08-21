@@ -1,5 +1,5 @@
-use struum_types::{Buffer, GPUType, StruumError};
 use regex::Regex;
+use struum_types::{Buffer, GPUType, StruumError};
 
 // TODO(slok): Support multiple backend types
 
@@ -68,17 +68,13 @@ impl Kernel {
         let work_buffer_name = self
             .work_buffer
             .as_ref()
-            .ok_or(StruumError::NotFound(
-                "Work Buffer Empty".to_string(),
-            ))?;
+            .ok_or(StruumError::NotFound("Work Buffer Empty".to_string()))?;
 
         let binding = self
             .buffer_bindings
             .iter()
             .find(|b| &b.buffer.name == work_buffer_name)
-            .ok_or(StruumError::NotFound(
-                "Work Buffer not found".to_string(),
-            ))?;
+            .ok_or(StruumError::NotFound("Work Buffer not found".to_string()))?;
 
         let count = binding.buffer.actual_len();
         self.group_size = Some((count as u32 + self.local_size - 1) / self.local_size);
@@ -91,9 +87,7 @@ impl Kernel {
 
         source.push_str("#version 430\n\n");
 
-        source.push_str(&format!(
-            "layout(local_size_x = {}) in;\n", self.local_size
-        ));
+        source.push_str(&format!("layout(local_size_x = {}) in;\n", self.local_size));
 
         // Keep track to struct so no duplication occurs
         let mut structs = std::collections::HashSet::new();
@@ -113,15 +107,10 @@ impl Kernel {
 
             source.push_str(&format!(
                 "layout(std430, binding = {}) buffer {}Buffer {{\n",
-                i,
-                gpu_type,
+                i, gpu_type,
             ));
 
-            source.push_str(&format!(
-                "    {} {}[];\n",
-                gpu_type,
-                buffer_name,
-            ));
+            source.push_str(&format!("    {} {}[];\n", gpu_type, buffer_name,));
 
             source.push_str("};\n\n");
         }
@@ -169,12 +158,7 @@ impl Kernel {
         mangled
     }
 
-
-    fn mangle_identifier(
-        source: &str,
-        original: &str,
-        mangled: &str,
-    ) -> String {
+    fn mangle_identifier(source: &str, original: &str, mangled: &str) -> String {
         let pattern = format!(r"\b{}\b", regex::escape(original));
 
         Regex::new(&pattern)
@@ -183,4 +167,3 @@ impl Kernel {
             .into_owned()
     }
 }
-

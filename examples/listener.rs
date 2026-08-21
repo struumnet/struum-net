@@ -1,7 +1,6 @@
 use struum_network::layer::NetworkLayer;
-use struum_types::network::*;
 use struum_node::node;
-
+use struum_types::network::*;
 
 #[tokio::main]
 async fn main() {

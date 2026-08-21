@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemStruct};
+use syn::{ItemStruct, parse_macro_input};
 
 #[proc_macro_attribute]
 pub fn gpu_type(_attr: TokenStream, input: TokenStream) -> TokenStream {
@@ -32,12 +32,9 @@ pub fn gpu_type(_attr: TokenStream, input: TokenStream) -> TokenStream {
             Some(name) => name,
 
             None => {
-                return syn::Error::new_spanned(
-                    field,
-                    "GPUType only supports named fields",
-                )
-                .to_compile_error()
-                .into();
+                return syn::Error::new_spanned(field, "GPUType only supports named fields")
+                    .to_compile_error()
+                    .into();
             }
         };
 

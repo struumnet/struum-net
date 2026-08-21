@@ -1,27 +1,35 @@
 use serde_derive::{Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
 /// This enum describes the state of the connection that the worker is in,
 ///
 /// CURRENTLY IN THE MVP
 /// By Default, a worker is in a polling state to the router
 /// unless it receives a
 #[derive(Debug)]
-pub enum WorkerConnectionState {
+pub enum NodeConnectionState {
     POLLING,
     FOUND,
     CONNECTING,
     CONNECTED,
 }
+
 /// This enum is used to describe the state of the worker in a network
 #[derive(Debug)]
-pub enum WorkerState {
+pub enum NodeState {
     IDLE,
     WORKING,
 }
 
-pub enum Packet {
-    TASK_REGISTER(RegisterTaskPacket),
-    TASK(TaskPacket),
+#[derive(Serialize, Deserialize, Debug)]
+pub enum UdpPacket {
     HELLO(HelloPacket),
+    INTRODUCTION(IntroductionPacket),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum TcpPacket {
+    TASK(TaskPacket),
+    REGISTERTASK(RegisterTaskPacket),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -38,6 +46,13 @@ pub struct TaskPacket {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HelloPacket {}
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct IntroductionPacket {
+    pub ip: SocketAddr,
+    pub role: NodeRole,
+    pub backend: NodeBackend,
+}
+
 #[derive(Default, Deserialize, Serialize, Debug)]
 pub struct UID {
     inner: u8,
@@ -48,9 +63,16 @@ impl UID {
         return UID { inner };
     }
 }
-#[derive(Debug)]
-pub enum WorkerBackend {
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+pub enum NodeBackend {
     OpenGL,
     Vulkan,
     Cpu,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+pub enum NodeRole {
+    COORDINATOR,
+    NODE,
 }
