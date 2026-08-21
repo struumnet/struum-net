@@ -40,7 +40,7 @@ impl Worker {
                 .map_err(|_| {
                     StruumError::NetworkConnectionError("Couldn't receive a broadcast connection!".to_string())
                 })?;
-            let message = &buf[..amt];
+            let message = bincode::deserialize<HelloPacket>(&buf[..amt]);
             println!("Received {:?} from {:?}", message, src);
             Ok(())
         } else {

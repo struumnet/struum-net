@@ -44,3 +44,9 @@ impl UID {
         };
     }
 }
+
+pub enum WorkerBackend {
+    OpenGL,
+    Vulkan,
+    Cpu,
+}

@@ -1,5 +1,3 @@
-pub mod coordinator;
-pub mod worker;
 
 #[cfg(test)]
 mod tests {

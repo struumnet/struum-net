@@ -1046,6 +1046,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "struum-worker"
+version = "0.1.0"
+dependencies = [
+ "struum_types",
+]
+
+[[package]]
+name = "struum_coordinator"
+version = "0.1.0"
+dependencies = [
+ "struum_types",
+]
+
+[[package]]
 name = "struum_network"
 version = "0.1.0"
 dependencies = [
