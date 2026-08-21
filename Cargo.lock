@@ -1165,13 +1165,22 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "struum-net"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "bytemuck",
+ "gl",
+ "glfw",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "serde",
+ "serde_derive",
  "struum_kernel",
  "struum_macros",
  "struum_network",
  "struum_node",
  "struum_opengl",
  "struum_types",
+ "syn 3.0.3",
  "tokio",
 ]
 
@@ -1189,7 +1198,6 @@ dependencies = [
  "regex",
  "struum_macros",
  "struum_types",
- "syn 3.0.3",
 ]
 
 [[package]]

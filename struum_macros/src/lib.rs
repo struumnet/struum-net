@@ -61,8 +61,8 @@ pub fn gpu_type(_attr: TokenStream, input: TokenStream) -> TokenStream {
         #[derive(
             Clone,
             Copy,
-            ::struum_types::bytemuck::Pod,
-            ::struum_types::bytemuck::Zeroable,
+            ::bytemuck::Pod,
+            ::bytemuck::Zeroable,
         )]
         #input
 
