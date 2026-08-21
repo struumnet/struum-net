@@ -5,15 +5,17 @@ use crate::shader::Shader;
 use std::collections::HashMap;
 
 use struum_types::{Buffer, StruumError};
+use struum_kernel::Kernel;
 
 pub struct OpenglBackend {
     shader: Shader,
     gl_buffers: HashMap<String, GlBuffer>,
+    group_size: u32,
     _context: GlContext,
 }
 
 impl OpenglBackend {
-    pub fn new(shader: &str, buffers: &[Buffer]) -> Result<OpenglBackend, StruumError> {
+    pub fn new(shader: &str, buffers: &[Buffer], group_size: u32) -> Result<Self, StruumError> {
         let context = GlContext::new()?;
 
         // Compile Shader
@@ -31,14 +33,49 @@ impl OpenglBackend {
         Ok(Self {
             shader: shader,
             gl_buffers: gl_buffers,
+            group_size: group_size,
+            _context: context,
+        })
+    }
+
+    pub fn from_kernel(kernel: &Kernel) -> Result<Self, StruumError> {
+        let context = GlContext::new()?;
+
+        // Compile Shader
+        let shader = Shader::new(
+            kernel.get_gpu_source()
+            .ok_or(StruumError::NotFound(
+                "GPU Source is None, Maybe kernel is not packed using 'pack' method"
+                    .to_string()
+            ))?
+        )?;
+
+        // Construct opengl buffers
+        let mut gl_buffers = HashMap::new();
+
+        for (binding_id, binding) in kernel.get_buffer_bindings().iter().enumerate() {
+            let gl_buffer = GlBuffer::new(&binding.buffer);
+            gl_buffer.bind(binding_id as u32);
+            gl_buffers.insert(gl_buffer.name.clone(), gl_buffer);
+        }
+
+        let group_size = kernel
+            .get_group_size()
+            .ok_or(StruumError::NotFound(
+                "GPU Group Size is None, Maybe kernel is not packed using 'pack' method"
+                    .to_string()
+            ))?;
+
+        Ok(Self {
+            shader: shader,
+            gl_buffers: gl_buffers,
+            group_size: group_size,
             _context: context,
         })
     }
 
     pub fn execute(&self) {
-        // TODO(slok): Determine dispatch size.
-        // (input_count + invocation_count - 1) / invocation_count
-        self.shader.dispatch_and_wait(1, 1, 1);
+        self.shader.dispatch_and_wait(self.group_size, 1, 1);
     }
 
     pub fn update(&mut self, buffer_name: &str, buffer: &Buffer) -> Result<(), StruumError> {

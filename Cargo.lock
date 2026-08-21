@@ -1237,6 +1237,7 @@ dependencies = [
  "bytemuck",
  "gl",
  "glfw",
+ "struum_kernel",
  "struum_types",
 ]
 

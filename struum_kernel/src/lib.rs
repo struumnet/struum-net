@@ -7,10 +7,10 @@ use struum_types::{Buffer, GPUType, StruumError};
 // 256 might be enough of invocations needed per work group
 // but if it created a bottleneck then figure something out
 
-struct BufferBinding {
-    buffer: Buffer,
-    gpu_type: &'static str,
-    gpu_struct: String,
+pub struct BufferBinding {
+    pub buffer: Buffer,
+    pub gpu_type: &'static str,
+    pub gpu_struct: String,
 }
 
 pub struct Kernel {
@@ -64,6 +64,10 @@ impl Kernel {
         self.gpu_source.as_deref()
     }
 
+    pub fn get_buffer_bindings(&self) -> &[BufferBinding] {
+        &self.buffer_bindings
+    }
+
     fn compute_group_size(&mut self) -> Result<(), StruumError> {
         let work_buffer_name = self
             .work_buffer
@@ -106,8 +110,10 @@ impl Kernel {
             let gpu_type = &binding.gpu_type;
 
             source.push_str(&format!(
-                "layout(std430, binding = {}) buffer {}Buffer {{\n",
-                i, gpu_type,
+                "layout(std430, binding = {}) buffer _struum_{}Buffer_{}_ {{\n",
+                i,
+                gpu_type,
+                i,
             ));
 
             source.push_str(&format!("    {} {}[];\n", gpu_type, buffer_name,));
@@ -121,29 +127,26 @@ impl Kernel {
 
         // Generate main()
         source.push_str(&format!(
-            "void main() {{\n\
-                uint id = gl_GlobalInvocationID.x;\n\
-                {}(id);\n\
-            }}\n",
+            "void main() {{\n    uint id = gl_GlobalInvocationID.x;\n    {}(id);\n}}\n",
             self.entry_point
         ));
 
         // TODO(slok): This finds and replaces the original variables
         // Can change the strings content of shader but i dont think its imp
         // So find a better way if possible
-        self.mangle_source(&source);
+        source = self.mangle_source(&source);
 
         self.gpu_source = Some(source);
     }
 
     fn mangle_source(&self, source: &str) -> String {
-        let mut mangled = String::new();
+        let mut mangled = source.to_string();
 
         for binding in &self.buffer_bindings {
             mangled = Self::mangle_identifier(
-                source,
+                &mangled,
                 &binding.buffer.name,
-                &format!("__struum_{}", binding.buffer.name),
+                &format!("_struum_{}", binding.buffer.name),
             );
         }
 
@@ -151,7 +154,7 @@ impl Kernel {
             mangled = Self::mangle_identifier(
                 &mangled,
                 &binding.gpu_type,
-                &format!("__struum_{}", binding.gpu_type),
+                &format!("_struum_{}", binding.gpu_type),
             );
         }
 

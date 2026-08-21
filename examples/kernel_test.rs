@@ -2,14 +2,17 @@ use struum_kernel::*;
 
 use struum_macros::gpu_type;
 use struum_types::Buffer;
+use struum_opengl::OpenglBackend;
 
 #[gpu_type]
+#[derive(Debug)]
 struct Vec2 {
     x: f32,
     y: f32,
 }
 
 #[gpu_type]
+#[derive(Debug)]
 struct Param {
     m: f32,
     c: f32,
@@ -38,13 +41,18 @@ fn main() {
             Vec2 { x: 3.0, y: 30.0 },
             Vec2 { x: 4.0, y: 40.0 },
             Vec2 { x: 5.0, y: 50.0 },
-        ],
-    ));
-    kernel.add_buffer::<Vec2>(Buffer::empty::<Vec2>("output", 5));
-    kernel.set_work_buffer("pos");
+        ])
+    );
+    kernel.add_buffer::<Vec2>(
+        Buffer::empty::<Vec2>("output", 5)
+    );
 
+    kernel.set_work_buffer("pos");
     kernel.pack().unwrap();
 
-    let src = kernel.get_gpu_source().unwrap();
-    println!("{}", src);
+    let mut backend = OpenglBackend::from_kernel(&kernel).unwrap();
+    backend.execute();
+
+    let out = backend.read_buffer::<Vec2>("output").unwrap();
+    println!("{:#?}", out);
 }
