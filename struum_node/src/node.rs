@@ -6,6 +6,7 @@ use struum_types::network::{
     HelloPacket, IntroductionPacket, NodeBackend, NodeRole, UID, UdpPacket,
 };
 
+#[derive(Debug)]
 pub struct Node<const BUF_SIZE: usize> {
     pub id: UID,
     pub net: NetworkLayer<BUF_SIZE>,

@@ -6,4 +6,5 @@ pub enum StruumError {
     NotFound(String),
     NetworkConnectionError(String),
     SerializationError(String),
+    ParserError(String),
 }

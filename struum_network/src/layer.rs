@@ -1,10 +1,10 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::net::AddrParseError;
 use std::net::{IpAddr, SocketAddr};
+use std::net::AddrParseError;
 use std::sync::Arc;
-use struum_types::StruumError::NetworkConnectionError;
+use struum_types::StruumError::{NetworkConnectionError,ParserError};
 use struum_types::{
     StruumError,
     network::{TcpPacket, UdpPacket},
@@ -13,27 +13,44 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
+/// Network layer is an Abstract layers that allows for any higher-level objects
+/// like `Node`, `Coordinator` to consist of a Network Layer for itself.
+#[derive(Debug)]
 pub struct NetworkLayer<const BUF_SIZE: usize> {
+    /// Public(Local) IPv4 address of itself, fetched during an outbound UDP connection.
     pub ip: IpAddr,
+    /// A pool of connections of SocketAddresses with live connection made with other `NetworkLayer`s.
     connections: HashMap<SocketAddr, Arc<Mutex<TcpStream>>>,
+    /// A reserved port to be used by the OS for UDP communication.
     pub udp_port: u16,
+    /// A reserved port to be used by the OS for TCP communication.
     pub tcp_port: u16,
 }
+
 impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     pub async fn new(udp_port: u16, tcp_port: u16) -> Result<Self, StruumError> {
-        Ok(Self {
-            ip: get_local_ip().await?,
-            connections: HashMap::default(),
-            udp_port,
-            tcp_port,
-        })
-    }
+            Ok(Self {
+                ip: get_local_ip().await?,
+                connections: HashMap::default(),
+                udp_port,
+                tcp_port,
+            })
+        }
 }
 
+
+/// Gives a local IP address for the NetworkLayer
 async fn get_local_ip() -> Result<IpAddr, StruumError> {
     let socket = UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| StruumError::NetworkConnectionError(e.to_string()))?;
+
+    // Pseudo connection request required to be made to resolve an IP
+    socket
+        .connect("8.8.8.8:80")
+        .await
+        .map_err(|e|{StruumError::NetworkConnectionError(e.to_string())})?;
+
     Ok(socket
         .local_addr()
         .map_err(|e| StruumError::NetworkConnectionError(e.to_string()))?
@@ -139,7 +156,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     pub async fn listen_udp<T: Debug + for<'a> Deserialize<'a>>(
         &mut self,
     ) -> Result<(T, SocketAddr), StruumError> {
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", self.udp_port))
+        let socket = UdpSocket::bind(format!("{}:{}",self.ip, self.udp_port))
             .await
             .map_err(|e| StruumError::NetworkConnectionError(e.to_string()))?;
         let mut buf = [0; BUF_SIZE];
