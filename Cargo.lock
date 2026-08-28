@@ -1188,6 +1188,7 @@ dependencies = [
 name = "struum_coordinator"
 version = "0.1.0"
 dependencies = [
+ "struum_network",
  "struum_types",
 ]
 

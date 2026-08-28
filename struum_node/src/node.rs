@@ -18,38 +18,28 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         return self.net.broadcast(UdpPacket::HELLO(HelloPacket {})).await;
     }
 
-    pub async fn introduce_node(&mut self, addr: SocketAddr) -> Result<(), StruumError> {
+    pub async fn introduce(&mut self) -> Result<(), StruumError> {
         self.net
             .send_udp_data(
                 UdpPacket::INTRODUCTION(IntroductionPacket {
                     ip: SocketAddr::new(self.net.ip, self.net.udp_port),
                     role: NodeRole::NODE,
-                    backend: self.backend,
+                    backend: Some(self.backend),
                 }),
-                addr,
+                SocketAddr::new(self.net.ip, self.net.udp_port),
             )
             .await?;
         Ok(())
     }
 
     pub async fn listen_hello(&mut self) -> Result<SocketAddr, StruumError> {
-        let (resp, src) = self.net.listen_udp::<UdpPacket>().await?;
-        if let UdpPacket::HELLO(p) = resp {
-            println!("Hello Received!");
-            return Ok(src);
-        }
-        return Err(StruumError::NetworkConnectionError(
-            "Failed to received HELLO".to_string(),
-        ));
+        let (resp, src) = self.net.listen_udp::<HelloPacket>().await?;
+        println!("Hello Received!");
+        return Ok(src);
     }
     pub async fn listen_introduction(&mut self) -> Result<IntroductionPacket, StruumError> {
-        let (resp, _) = self.net.listen_udp::<UdpPacket>().await?;
-        if let UdpPacket::INTRODUCTION(intro) = resp {
-            println!("Introduction Received!");
-            return Ok(intro);
-        }
-        return Err(StruumError::NetworkConnectionError(
-            "Failed to received HELLO".to_string(),
-        ));
+        let (resp, _) = self.net.listen_udp::<IntroductionPacket>().await?;
+        println!("Introduction Received!");
+        return Ok(resp);
     }
 }

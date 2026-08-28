@@ -1,5 +1,5 @@
 use serde_derive::{Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{SocketAddr};
 /// This enum describes the state of the connection that the worker is in,
 ///
 /// CURRENTLY IN THE MVP
@@ -50,7 +50,7 @@ pub struct HelloPacket {}
 pub struct IntroductionPacket {
     pub ip: SocketAddr,
     pub role: NodeRole,
-    pub backend: NodeBackend,
+    pub backend: Option<NodeBackend>,
 }
 
 #[derive(Default, Deserialize, Serialize, Debug)]
