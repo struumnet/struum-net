@@ -1,58 +1,31 @@
-use struum_types::{StruumError, network::{HelloPacket, IntroductionPacket, NodeRole, UID}};
+use struum_types::{StruumError, network::{NetworkCoordinator, NodeDetails,UID}};
+use std::collections::HashMap;
 use struum_network::layer::NetworkLayer;
+use async_trait::async_trait;
 
 /// Represents the Coordinator for connections
-pub struct Coordinator<T> {
-    pub _id: UID,
-    net: NetworkLayer::<T>,
+pub struct Coordinator<const BUF_SIZE: usize> {
+    _id: UID,
+    net: NetworkLayer::<BUF_SIZE>,
+    nodes: HashMap<UID,NodeDetails>,
 }
 
-impl Coordinator {
-    pub fn new(udp_port: u16, tcp_port: u16)->Result<Self,StruumError>{
+impl <const BUF_SIZE:usize> Coordinator<BUF_SIZE>{
+    pub async fn new(udp_port: u16, tcp_port: u16)->Result<Self,StruumError>{
         Ok(Self{
             _id: UID::new(0),
-            net: NetworkLayer::new(udp_port,tcp_port)?,
+            net: NetworkLayer::new(udp_port,tcp_port).await?,
+            nodes: HashMap::default(),
         })
     }
 }
 
-impl Coordinator {
-    pub async fn notify_network(&mut self) -> Result<(), StruumError> {
-        return self.net.broadcast(UdpPacket::HELLO(HelloPacket {})).await;
+#[async_trait]
+impl<const BUF_SIZE: usize> NetworkCoordinator for  Coordinator<BUF_SIZE> {
+    async fn introduce_sibling_node(&mut self,node_id: &UID) -> Result<&NodeDetails, StruumError>{
+        self.nodes.get(node_id).ok_or(StruumError::NotFound("Node not found in registered network!".to_string()))
     }
-
-    pub async fn introduce(&mut self, addr: SocketAddr) -> Result<(), StruumError> {
-        self.net
-            .send_udp_data(
-                UdpPacket::INTRODUCTION(IntroductionPacket {
-                    ip: SocketAddr::new(self.net.ip, self.net.udp_port),
-                    role: NodeRole::COORDINATOR,
-                    backend: None,
-                }),
-                addr,
-            )
-            .await?;
+    async fn establish_information_exchange(&mut self)->Result<(),StruumError>{
         Ok(())
-    }
-
-    pub async fn listen_hello(&mut self) -> Result<SocketAddr, StruumError> {
-        let (resp, src) = self.net.listen_udp::<HelloPacket>().await?;
-        if let UdpPacket::HELLO(p) = resp {
-            println!("Hello Received!");
-            return Ok(src);
-        }
-        return Err(StruumError::NetworkConnectionError(
-            "Failed to received HELLO".to_string(),
-        ));
-    }
-    pub async fn listen_introduction(&mut self) -> Result<IntroductionPacket, StruumError> {
-        let (resp, _) = self.net.listen_udp::<IntroductionPacket>().await?;
-        if let UdpPacket::INTRODUCTION(intro) = resp {
-            println!("Introduction Received!");
-            return Ok(intro);
-        }
-        return Err(StruumError::NetworkConnectionError(
-            "Failed to received HELLO".to_string(),
-        ));
     }
 }

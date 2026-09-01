@@ -35,6 +35,7 @@ proc-macro2 = "1.0.107"
 quote = "1.0.47"
 syn = { version = "3.0.3", features = ["full"] }
 regex = "1.13.1"
+async-trait = "0.1.92"
 
 [dependencies]
 struum_opengl = { workspace = true }

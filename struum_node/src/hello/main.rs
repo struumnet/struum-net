@@ -4,7 +4,7 @@ use struum_types::{StruumError, network::*};
 
 #[tokio::main]
 async fn main() -> Result<(), StruumError> {
-    let w_id = UID::new(0);
+    let w_id = UID::new(1);
     let mut w1 = node::Node::<2048> {
         id: w_id,
         net: NetworkLayer::new(
@@ -17,6 +17,7 @@ async fn main() -> Result<(), StruumError> {
     println!("We are: \n[IP]{}\n[UDP-PORT]{}\n[TCP-PORT]{}",w1.net.ip,w1.net.udp_port,w1.net.tcp_port);
 
     println!("Introducing to network!");
-    let intro = w1.introduce().await?;
+    let ip = w1.listen_hello().await?;
+    let intro = w1.introduce(ip).await?;
     Ok(())
 }

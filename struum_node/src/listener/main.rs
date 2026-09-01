@@ -18,6 +18,7 @@ async fn main() -> Result<(), StruumError> {
     println!("We are: \n[IP]{}\n[UDP-PORT]{}\n[TCP-PORT]{}",w1.net.ip,w1.net.udp_port,w1.net.tcp_port);
 
     println!("Waiting for introduction!");
-    let intro = w1.listen_introduction().await?;
+    let _ = w1.notify_network().await?;
+    let _ = w1.listen_introduction().await?;
     Ok(())
 }

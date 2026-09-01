@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 struum_types = {workspace=true}
 struum_network = {workspace=true}
+async-trait = {workspace=true}
