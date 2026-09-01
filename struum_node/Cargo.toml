@@ -8,3 +8,15 @@ struum_types = {workspace = true}
 struum_network = {workspace = true}
 bincode = { workspace = true }
 tokio = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hello"
+path = "src/hello/main.rs"
+
+[[bin]]
+name = "listener"
+path = "src/listener/main.rs"
+
