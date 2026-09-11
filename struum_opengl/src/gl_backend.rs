@@ -107,4 +107,24 @@ impl OpenglBackend {
 
         Ok(bytemuck::cast_slice(&data).to_vec())
     }
+
+    pub fn sync_to_kernel(&self, kernel: &mut Kernel) -> Result<(), StruumError> {
+        for (_, gl_buffer) in &self.gl_buffers {
+            let data = gl_buffer.read();
+
+            let binding = kernel
+                .get_buffer_bindings_mut()
+                .iter_mut()
+                .find(|binding| binding.buffer.name == gl_buffer.name)
+                .ok_or_else(|| {
+                    StruumError::NotFound(
+                        format!("Buffer '{}' not found in kernel", gl_buffer.name)
+                    )
+                })?;
+
+            binding.buffer.data = data;
+        }
+
+        Ok(())
+    }
 }

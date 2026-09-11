@@ -7,6 +7,7 @@ members = [
     "struum_types",
     "struum_kernel",
     "struum_macros",
+    "struum_scheduler",
 ]
 resolver="3"
 
@@ -23,6 +24,7 @@ struum_node = {path = "./struum_node"}
 struum_coordinator = {path = "./struum_coordinator"}
 struum_kernel = {path = "./struum_kernel"}
 struum_macros = {path = "./struum_macros"}
+struum_scheduler = {path = "./struum_scheduler"}
 
 tokio = { version = "1.53.1", features = ["full"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -36,6 +38,7 @@ quote = "1.0.47"
 syn = { version = "3.0.3", features = ["full"] }
 regex = "1.13.1"
 async-trait = "0.1.92"
+uuid = { version = "1.26.0", features = ["v4"] }
 
 [dependencies]
 struum_opengl = { workspace = true }
@@ -44,6 +47,7 @@ struum_network = { workspace = true }
 struum_node  = { workspace = true }
 struum_kernel = { workspace = true }
 struum_macros = { workspace = true }
+struum_scheduler = { workspace = true }
 
 tokio = { workspace = true }
 bytemuck = { workspace = true }
@@ -56,3 +60,4 @@ proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
 regex = { workspace = true }
+uuid = { workspace = true }

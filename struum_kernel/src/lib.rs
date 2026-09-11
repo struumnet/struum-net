@@ -74,6 +74,24 @@ impl Kernel {
         &self.buffer_bindings
     }
 
+    pub fn get_buffer_bindings_mut(&mut self) -> &mut [BufferBinding] {
+        &mut self.buffer_bindings
+    }
+
+    pub fn get_buffer(&self, name: &str) -> Option<&Buffer> {
+        self.buffer_bindings
+            .iter()
+            .find(|binding| binding.buffer.name == name)
+            .map(|binding| &binding.buffer)
+    }
+
+    pub fn get_buffer_mut(&mut self, name: &str) -> Option<&mut Buffer> {
+        self.buffer_bindings
+            .iter_mut()
+            .find(|binding| binding.buffer.name == name)
+            .map(|binding| &mut binding.buffer)
+    }
+
     fn compute_group_size(&mut self) -> Result<(), StruumError> {
         let work_buffer_name = self
             .work_buffer
@@ -187,7 +205,7 @@ void main() {{
         identifier: &str,
         replacement: &str,
     ) -> String {
-        let re = regex::Regex::new(
+        let re = Regex::new(
             &format!(r"\b{}\b", regex::escape(identifier))
         ).unwrap();
 

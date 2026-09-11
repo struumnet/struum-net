@@ -1,8 +1,9 @@
-use struum_kernel::*;
+use struum_scheduler::JobScheduler;
 
+use struum_kernel::*;
 use struum_macros::gpu_type;
 use struum_types::Buffer;
-use struum_opengl::OpenglBackend;
+use tokio::sync::mpsc;
 
 #[gpu_type]
 #[derive(Debug)]
@@ -18,7 +19,13 @@ struct Param {
     c: f32,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
+
+    // Need to create a channel for communication between process and job schedular worker
+    let (tx, mut rx) = mpsc::channel(100);
+    let js = JobScheduler::new(tx, 2);
+
     let source = r#"
         void compute(uint i) {
             Param p = param[0];
@@ -30,6 +37,7 @@ fn main() {
         }
     "#;
 
+    // Create kernel
     let mut kernel = Kernel::new(source, "compute");
 
     kernel.add_buffer::<Param>(Buffer::new("param", &[Param { m: 2.0, c: 3.0 }]));
@@ -50,15 +58,29 @@ fn main() {
     kernel.set_work_buffer("pos");
     kernel.pack().unwrap();
 
-    //js.add_job(kernel, |backend| {
-    //    let out = backend.read_buffer::<Vec2>("output").unwrap();
-    //    println!("{:#?}", out);
-    //});
+    // Submit the job
+    let job_id = js.add_job(kernel).await;
 
-    let mut backend = OpenglBackend::from_kernel(&kernel).unwrap();
-    backend.execute();
+    println!("Submitted job: {job_id}");
 
-    let out = backend.read_buffer::<Vec2>("output").unwrap();
-    println!("{:#?}", out);
+    // Job response listener
+    loop {
+        // Get response from the job schedular
+        let Some(id) = rx.recv().await else {
+            break;
+        };
 
+        println!("Completed: {id}");
+
+        // Get the kernel as the result of the job
+        if let Some(kernel) = js.get_result_of_job(&id).await {
+
+            // Read the output buffer from kernel
+            let output = kernel
+                .get_buffer("output")
+                .unwrap();
+            let values = output.as_slice::<Vec2>();
+            println!("{values:#?}");
+        }
+    }
 }
