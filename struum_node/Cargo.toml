@@ -12,6 +12,7 @@ bincode = { workspace = true }
 bytemuck = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+log = { workspace = true }
 
 [lib]
 path = "src/lib.rs"

@@ -32,11 +32,18 @@ impl<const BUF_SIZE: usize> Coordinator<BUF_SIZE> {
 
     /// Registers a node as available in the network.
     pub fn register_node(&mut self, details: NodeDetails) {
+        log::info!(
+            "Coordinator registered node {} ({}, backend: {:?})",
+            details.id,
+            details.ip,
+            details.backend
+        );
         self.nodes.insert(details.id, details);
     }
 
     /// Removes a node from the network (e.g. on disconnect).
     pub fn deregister_node(&mut self, id: &UID) {
+        log::info!("Coordinator deregistered node {}", id);
         self.nodes.remove(id);
     }
 
@@ -84,6 +91,7 @@ impl<const BUF_SIZE: usize> Coordinator<BUF_SIZE> {
 
     /// Introduces two sibling nodes to each other so they can establish direct communication.
     pub async fn introduce_nodes(&mut self, node_a_id: &UID, node_b_id: &UID) -> Result<(), StruumError> {
+        log::info!("Coordinator introducing sibling nodes: {} <---> {}", node_a_id, node_b_id);
         let node_a = self
             .nodes
             .get(node_a_id)

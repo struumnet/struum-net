@@ -63,12 +63,18 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
     /// Submits a kernel to be scheduled and executed by worker threads on this node.
     pub async fn submit_job(&self, kernel: Kernel) -> JobId {
-        self.scheduler.add_job(kernel).await
+        let id = self.scheduler.add_job(kernel).await;
+        log::info!("Node {} submitted job {} to local scheduler", self.id, id);
+        id
     }
 
     /// Waits for the next job completed by one of the local worker threads.
     pub async fn recv_completed_job(&mut self) -> Option<JobId> {
-        self.job_rx.recv().await
+        let id = self.job_rx.recv().await;
+        if let Some(ref job_id) = id {
+            log::info!("Node {} received completion notice for job {}", self.id, job_id);
+        }
+        id
     }
 
     /// Retrieves the resulting Kernel of a completed job from the local scheduler.
@@ -151,14 +157,19 @@ impl<const BUF_SIZE: usize> NetworkCommunicator for Node<BUF_SIZE> {
     /// Listens for a hello packet from the network.
     async fn listen_hello(&mut self) -> Result<SocketAddr, StruumError> {
         let (_, src) = self.net.listen_udp::<HelloPacket>().await?;
-        println!("Hello Received from {}", src);
+        log::info!("Node {} received Hello packet from {}", self.id, src);
         Ok(src)
     }
 
     /// Listens for an introduction packet from a coordinator or sibling node.
     async fn listen_introduction(&mut self) -> Result<IntroductionPacket, StruumError> {
         let (resp, _src) = self.net.listen_udp::<IntroductionPacket>().await?;
-        println!("Introduction Received from node {}", resp.id);
+        log::info!(
+            "Node {} received Introduction packet from sibling node {} at {}",
+            self.id,
+            resp.id,
+            resp.ip
+        );
         Ok(resp)
     }
 }

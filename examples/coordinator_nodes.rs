@@ -22,6 +22,7 @@ struct Param {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut coordinator = Coordinator::<2048>::new(39001, 39002).await?;
 

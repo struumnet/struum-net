@@ -8,3 +8,4 @@ struum_kernel = { workspace = true }
 struum_opengl = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
+log = { workspace = true }

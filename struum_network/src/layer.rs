@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::net::AddrParseError;
 use std::sync::Arc;
-use struum_types::StruumError::{NetworkConnectionError,ParserError};
+use struum_types::StruumError::NetworkConnectionError;
 use struum_types::{
     StruumError,
     network::{TcpPacket, UdpPacket},
@@ -168,7 +168,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         })?;
         let message = bincode::deserialize::<T>(&buf[..amt])
             .map_err(|e| StruumError::SerializationError(e.to_string()))?;
-        println!("Received {:?} from {:?}", message, src);
+        log::debug!("Received {:?} from {:?}", message, src);
         Ok((message, src))
     }
 

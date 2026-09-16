@@ -24,13 +24,13 @@ pub(crate) async fn worker(state: Arc<Mutex<SchedulerState>>, tx: Sender<JobId>)
 
         let id = job.id.clone();
 
-        println!("Starting job {id}");
+        log::debug!("Worker starting job {id}");
 
         {
             let backend = match OpenglBackend::from_kernel(&job.kernel) {
                 Ok(backend) => backend,
                 Err(err) => {
-                    eprintln!("Failed to create backend: {err:?}");
+                    log::error!("Worker failed to create backend for job {id}: {err:?}");
                     continue;
                 }
             };
@@ -38,7 +38,7 @@ pub(crate) async fn worker(state: Arc<Mutex<SchedulerState>>, tx: Sender<JobId>)
             backend.sync_to_kernel(&mut job.kernel).unwrap(); //TODO(slok): Remove unwrap
         };
 
-        println!("Job {id} done");
+        log::debug!("Worker finished job {id}");
 
         {
             let mut state = state.lock().await;

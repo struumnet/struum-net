@@ -8,3 +8,4 @@ struum_types = {workspace=true}
 struum_network = {workspace=true}
 async-trait = {workspace=true}
 tokio = {workspace=true}
+log = {workspace=true}
