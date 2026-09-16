@@ -8,6 +8,7 @@ members = [
     "struum_kernel",
     "struum_macros",
     "struum_scheduler",
+    "struum_relay",
 ]
 resolver="3"
 
@@ -25,6 +26,7 @@ struum_coordinator = {path = "./struum_coordinator"}
 struum_kernel = {path = "./struum_kernel"}
 struum_macros = {path = "./struum_macros"}
 struum_scheduler = {path = "./struum_scheduler"}
+struum_relay = {path = "./struum_relay"}
 
 tokio = { version = "1.53.1", features = ["full"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -51,6 +53,7 @@ struum_kernel = { workspace = true }
 struum_macros = { workspace = true }
 struum_scheduler = { workspace = true }
 struum_coordinator = { workspace = true }
+struum_relay = { workspace = true }
 
 log = { workspace = true }
 env_logger = { workspace = true }

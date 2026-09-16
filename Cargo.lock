@@ -1408,6 +1408,7 @@ dependencies = [
  "struum_network",
  "struum_node",
  "struum_opengl",
+ "struum_relay",
  "struum_scheduler",
  "struum_types",
  "syn 3.0.3",
@@ -1422,6 +1423,7 @@ dependencies = [
  "async-trait",
  "log",
  "struum_network",
+ "struum_node",
  "struum_types",
  "tokio",
 ]
@@ -1481,6 +1483,18 @@ dependencies = [
  "glfw",
  "struum_kernel",
  "struum_types",
+]
+
+[[package]]
+name = "struum_relay"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "env_logger",
+ "log",
+ "struum_network",
+ "struum_types",
+ "tokio",
 ]
 
 [[package]]

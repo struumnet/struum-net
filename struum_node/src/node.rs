@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use async_trait::async_trait;
 use tokio::sync::mpsc::{self, Receiver};
@@ -7,15 +8,84 @@ use struum_network::layer::NetworkLayer;
 use struum_scheduler::{JobId, JobScheduler};
 use struum_types::StruumError;
 use struum_types::network::{
-    HelloPacket, IntroductionPacket, NetworkCommunicator, NodeBackend, NodeDetails, NodeRole,
-    TaskPacket, TcpPacket, UID, UdpPacket,
+    HelloPacket, IntroductionPacket, NetworkCommunicator, NetworkCoordinator, NodeBackend,
+    NodeDetails, NodeRole, TaskPacket, TcpPacket, UID, UdpPacket,
 };
 
-/// Represents a computational Node in the network.
-/// Inter-node communication is coordinated via `NetworkCommunicator` / `struum_coordinator`,
-/// while intra-node worker threads communicate and execute jobs via `struum_scheduler`.
+/// Coordinator component embedded in a `Node`.
+/// Maintains the peer network map independently and provides node selection/lookup logic.
+#[derive(Debug, Default, Clone)]
+pub struct Coordinator {
+    /// Registered peer nodes in this network map.
+    pub nodes: HashMap<UID, NodeDetails>,
+    /// Cursor for round-robin node selection across registered peers.
+    next_node: usize,
+}
+
+impl Coordinator {
+    pub fn new() -> Self {
+        Self {
+            nodes: HashMap::default(),
+            next_node: 0,
+        }
+    }
+
+    /// Registers a peer node in this network map.
+    pub fn register_node(&mut self, details: NodeDetails) {
+        log::info!(
+            "Registered peer node {} ({}, backend: {:?})",
+            details.id,
+            details.ip,
+            details.backend
+        );
+        self.nodes.insert(details.id, details);
+    }
+
+    /// Removes a node from this network map.
+    pub fn deregister_node(&mut self, id: &UID) {
+        log::info!("Deregistered peer node {}", id);
+        self.nodes.remove(id);
+    }
+
+    /// Returns a reference to a registered peer node by UID.
+    pub fn get_node(&self, id: &UID) -> Option<&NodeDetails> {
+        self.nodes.get(id)
+    }
+
+    /// Returns all registered peer nodes in this network map.
+    pub fn get_nodes(&self) -> Vec<NodeDetails> {
+        self.nodes.values().cloned().collect()
+    }
+
+    /// Number of registered peer nodes in this network map.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Round-robin pick among registered peer nodes to balance work across peers.
+    pub fn select_node(&mut self) -> Option<NodeDetails> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let ids: Vec<UID> = self.nodes.keys().copied().collect();
+        let id = ids[self.next_node % ids.len()];
+        self.next_node = self.next_node.wrapping_add(1);
+        self.nodes.get(&id).cloned()
+    }
+
+    /// Selects a registered peer node matching the requested computation backend.
+    pub fn select_node_by_backend(&mut self, backend: NodeBackend) -> Option<NodeDetails> {
+        self.nodes
+            .values()
+            .find(|node| node.backend == Some(backend))
+            .cloned()
+    }
+}
+
+/// Represents a computational Node in the network with an embedded Coordinator.
+/// The embedded `coordinator` allows each node to store and manage its peer map independently.
 pub struct Node<const BUF_SIZE: usize> {
-    /// Id is immutable and uniquely identifies the node.
+    /// Id uniquely identifies the node.
     pub id: UID,
     /// Network layer with BUF_SIZE buffer for network communication.
     pub net: NetworkLayer<BUF_SIZE>,
@@ -25,6 +95,8 @@ pub struct Node<const BUF_SIZE: usize> {
     pub scheduler: JobScheduler,
     /// Channel receiver for completed job IDs from local worker threads.
     pub job_rx: Receiver<JobId>,
+    /// Embedded Coordinator component managing known peer nodes.
+    pub coordinator: Coordinator,
 }
 
 impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
@@ -33,12 +105,13 @@ impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
             .field("id", &self.id)
             .field("net", &self.net)
             .field("backend", &self.backend)
+            .field("peers_count", &self.coordinator.node_count())
             .finish()
     }
 }
 
 impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
-    /// Creates a new Node with a specified number of local worker threads.
+    /// Creates a new Node with an automatically generated UID.
     pub async fn new(
         udp_port: u16,
         tcp_port: u16,
@@ -66,6 +139,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             backend,
             scheduler,
             job_rx,
+            coordinator: Coordinator::new(),
         })
     }
 
@@ -108,10 +182,12 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         self.net.send_tcp_data(peer_addr, TcpPacket::TASK(task)).await
     }
 
-    /// Listens for an introduction packet sent by the coordinator introducing a sibling node.
+    /// Listens for an introduction packet sent by the coordinator or relay introducing a sibling node.
     pub async fn listen_sibling_introduction(&mut self) -> Result<NodeDetails, StruumError> {
         let intro = self.listen_introduction().await?;
-        Ok(NodeDetails::from(intro))
+        let details = NodeDetails::from(intro);
+        self.coordinator.register_node(details.clone());
+        Ok(details)
     }
 
     /// Returns the NodeDetails describing this node.
@@ -127,6 +203,97 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     /// Converts this node into its NodeDetails representation.
     pub fn into_node_details(self) -> NodeDetails {
         self.details()
+    }
+
+    /// Registers a peer node in this node's embedded coordinator map.
+    pub fn register_node(&mut self, details: NodeDetails) {
+        self.coordinator.register_node(details);
+    }
+
+    /// Removes a node from this node's embedded coordinator map.
+    pub fn deregister_node(&mut self, id: &UID) {
+        self.coordinator.deregister_node(id);
+    }
+
+    /// Returns a reference to a registered peer node by UID.
+    pub fn get_node(&self, id: &UID) -> Option<&NodeDetails> {
+        self.coordinator.get_node(id)
+    }
+
+    /// Returns all registered peer nodes in this node's network map.
+    pub fn get_nodes(&self) -> Vec<NodeDetails> {
+        self.coordinator.get_nodes()
+    }
+
+    /// Number of registered peer nodes in this node's network map.
+    pub fn node_count(&self) -> usize {
+        self.coordinator.node_count()
+    }
+
+    /// Round-robin pick among registered peer nodes.
+    pub fn select_node(&mut self) -> Option<NodeDetails> {
+        self.coordinator.select_node()
+    }
+
+    /// Selects a registered peer node matching the requested computation backend.
+    pub fn select_node_by_backend(&mut self, backend: NodeBackend) -> Option<NodeDetails> {
+        self.coordinator.select_node_by_backend(backend)
+    }
+
+    /// Listens for a node introduction packet via UDP and registers it in this node's embedded coordinator map.
+    pub async fn listen_for_node_registration(&mut self) -> Result<NodeDetails, StruumError> {
+        let (intro, _src) = self.net.listen_udp::<IntroductionPacket>().await?;
+        let details = NodeDetails::from(intro);
+        self.register_node(details.clone());
+        Ok(details)
+    }
+
+    /// Registers this node with a remote relay server by sending an Introduction packet.
+    pub async fn register_to_relay(&mut self, relay_addr: SocketAddr) -> Result<(), StruumError> {
+        self.introduce(relay_addr).await
+    }
+
+    /// Introduces two sibling peer nodes to each other so they can establish direct communication.
+    pub async fn introduce_nodes(&mut self, node_a_id: &UID, node_b_id: &UID) -> Result<(), StruumError> {
+        log::info!("Node {} introducing sibling nodes: {} <---> {}", self.id, node_a_id, node_b_id);
+        let node_a = self
+            .coordinator
+            .get_node(node_a_id)
+            .cloned()
+            .ok_or_else(|| StruumError::NotFound(format!("Node {} not found", node_a_id)))?;
+        let node_b = self
+            .coordinator
+            .get_node(node_b_id)
+            .cloned()
+            .ok_or_else(|| StruumError::NotFound(format!("Node {} not found", node_b_id)))?;
+
+        // Send Node B's details to Node A
+        self.net
+            .send_udp_data(
+                UdpPacket::INTRODUCTION(IntroductionPacket {
+                    id: node_b.id,
+                    ip: node_b.ip,
+                    role: node_b.role,
+                    backend: node_b.backend,
+                }),
+                node_a.ip,
+            )
+            .await?;
+
+        // Send Node A's details to Node B
+        self.net
+            .send_udp_data(
+                UdpPacket::INTRODUCTION(IntroductionPacket {
+                    id: node_a.id,
+                    ip: node_a.ip,
+                    role: node_a.role,
+                    backend: node_a.backend,
+                }),
+                node_b.ip,
+            )
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -184,9 +351,38 @@ impl<const BUF_SIZE: usize> NetworkCommunicator for Node<BUF_SIZE> {
     }
 }
 
+#[async_trait]
+impl<const BUF_SIZE: usize> NetworkCoordinator for Node<BUF_SIZE> {
+    /// Looks up a registered node by ID.
+    async fn introduce_sibling_node(&mut self, node_id: &UID) -> Result<&NodeDetails, StruumError> {
+        self.coordinator.get_node(node_id).ok_or_else(|| {
+            StruumError::NotFound("Node not found in registered network!".to_string())
+        })
+    }
+
+    /// Introduces two sibling nodes to each other so they can establish direct communication.
+    async fn introduce_nodes(&mut self, node_a_id: &UID, node_b_id: &UID) -> Result<(), StruumError> {
+        self.introduce_nodes(node_a_id, node_b_id).await
+    }
+
+    /// Cross-introduces all registered sibling nodes to each other in the network (mesh coordination).
+    async fn establish_information_exchange(&mut self) -> Result<(), StruumError> {
+        let node_list: Vec<NodeDetails> = self.coordinator.get_nodes();
+        for i in 0..node_list.len() {
+            for j in (i + 1)..node_list.len() {
+                let a = &node_list[i];
+                let b = &node_list[j];
+                self.introduce_nodes(&a.id, &b.id).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
     use struum_macros::gpu_type;
     use struum_types::Buffer;
 
@@ -273,5 +469,44 @@ mod tests {
         let into_details = node.into_node_details();
         assert_eq!(into_details, details);
     }
-}
 
+    #[tokio::test]
+    async fn test_node_embedded_coordinator() {
+        let mut node = Node::<1024>::new(38331, 38332, NodeBackend::Cpu, 1)
+            .await
+            .expect("Failed to initialize Node");
+
+        let peer1 = NodeDetails {
+            id: UID::new(101),
+            ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38341),
+            role: NodeRole::NODE,
+            backend: Some(NodeBackend::OpenGL),
+        };
+        let peer2 = NodeDetails {
+            id: UID::new(102),
+            ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38351),
+            role: NodeRole::NODE,
+            backend: Some(NodeBackend::Cpu),
+        };
+
+        // Access via node delegation
+        node.register_node(peer1.clone());
+        // Access via embedded coordinator field directly
+        node.coordinator.register_node(peer2.clone());
+
+        assert_eq!(node.node_count(), 2);
+        assert_eq!(node.coordinator.node_count(), 2);
+        assert_eq!(node.get_node(&UID::new(101)), Some(&peer1));
+        assert_eq!(node.coordinator.get_node(&UID::new(102)), Some(&peer2));
+
+        let selected = node.select_node();
+        assert!(selected.is_some());
+
+        let opengl_peer = node.select_node_by_backend(NodeBackend::OpenGL);
+        assert_eq!(opengl_peer.map(|p| p.id), Some(UID::new(101)));
+
+        node.deregister_node(&UID::new(101));
+        assert_eq!(node.get_node(&UID::new(101)), None);
+        assert_eq!(node.node_count(), 1);
+    }
+}

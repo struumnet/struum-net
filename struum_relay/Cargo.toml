@@ -1,12 +1,19 @@
 [package]
-name = "struum_coordinator"
+name = "struum_relay"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 struum_types = { workspace = true }
 struum_network = { workspace = true }
-struum_node = { workspace = true }
-async-trait = { workspace = true }
 tokio = { workspace = true }
 log = { workspace = true }
+env_logger = { workspace = true }
+async-trait = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "struum_relay"
+path = "src/main.rs"
