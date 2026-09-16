@@ -40,6 +40,16 @@ impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
 impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     /// Creates a new Node with a specified number of local worker threads.
     pub async fn new(
+        udp_port: u16,
+        tcp_port: u16,
+        backend: NodeBackend,
+        workers: u32,
+    ) -> Result<Self, StruumError> {
+        Self::with_id(UID::generate(), udp_port, tcp_port, backend, workers).await
+    }
+
+    /// Creates a new Node with a specified UID.
+    pub async fn with_id(
         id: UID,
         udp_port: u16,
         tcp_port: u16,
@@ -196,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_intra_node_thread_scheduling() {
-        let mut node = Node::<1024>::new(UID::new(10), 38111, 38112, NodeBackend::OpenGL, 2)
+        let mut node = Node::<1024>::with_id(UID::new(10), 38111, 38112, NodeBackend::OpenGL, 2)
             .await
             .expect("Failed to initialize Node");
 
@@ -244,13 +254,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_to_node_details_conversion() {
-        let node = Node::<1024>::new(UID::new(5), 38221, 38222, NodeBackend::Cpu, 1)
+        let node = Node::<1024>::new(38221, 38222, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node");
 
         // Test details()
         let details = node.details();
-        assert_eq!(details.id, UID::new(5));
+        assert_eq!(details.id, node.id);
         assert_eq!(details.ip.port(), 38221);
         assert_eq!(details.role, NodeRole::NODE);
         assert_eq!(details.backend, Some(NodeBackend::Cpu));

@@ -3,9 +3,7 @@ use struum_types::{StruumError, network::*};
 
 #[tokio::main]
 async fn main() -> Result<(), StruumError> {
-    let w_id = UID::new(1);
     let mut w1 = node::Node::<2048>::new(
-        w_id,
         34255,
         34265,
         NodeBackend::Cpu,

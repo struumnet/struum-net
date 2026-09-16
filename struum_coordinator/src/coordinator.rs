@@ -22,8 +22,12 @@ pub struct Coordinator<const BUF_SIZE: usize> {
 
 impl<const BUF_SIZE: usize> Coordinator<BUF_SIZE> {
     pub async fn new(udp_port: u16, tcp_port: u16) -> Result<Self, StruumError> {
+        Self::with_id(UID::generate(), udp_port, tcp_port).await
+    }
+
+    pub async fn with_id(id: UID, udp_port: u16, tcp_port: u16) -> Result<Self, StruumError> {
         Ok(Self {
-            id: UID::new(0),
+            id,
             net: NetworkLayer::new(udp_port, tcp_port).await?,
             nodes: HashMap::default(),
             next_node: 0,

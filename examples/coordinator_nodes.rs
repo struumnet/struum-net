@@ -26,20 +26,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut coordinator = Coordinator::<2048>::new(39001, 39002).await?;
 
-    let node1_id = UID::new(1);
-    let mut node1 = Node::<2048>::new(node1_id, 39011, 39012, NodeBackend::OpenGL, 2).await?;
-
-    let node2_id = UID::new(2);
-    let mut node2 = Node::<2048>::new(node2_id, 39021, 39022, NodeBackend::Cpu, 2).await?;
+    let mut node1 = Node::<2048>::new(39011, 39012, NodeBackend::OpenGL, 2).await?;
+    let mut node2 = Node::<2048>::new(39021, 39022, NodeBackend::Cpu, 2).await?;
     let details1 = node1.details();
     let details2 = node2.details();
 
     coordinator.register_node(details1.clone());
     coordinator.register_node(details2.clone());
 
-    let selected = coordinator.select_node().expect("Should select a node");
+    let _selected = coordinator.select_node().expect("Should select a node");
 
-    let opengl_node = coordinator
+    let _opengl_node = coordinator
         .select_node_by_backend(NodeBackend::OpenGL)
         .expect("Should find OpenGL node");
 

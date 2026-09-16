@@ -83,6 +83,10 @@ pub struct NodeDetails {
     pub backend: Option<NodeBackend>,
 }
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
+static NEXT_UID: AtomicU8 = AtomicU8::new(1);
+
 #[derive(
     Default,
     Deserialize,
@@ -95,7 +99,7 @@ pub struct NodeDetails {
     Copy,
 )]
 pub struct UID {
-    inner: u8,
+    pub inner: u8,
 }
 
 impl UID {
@@ -103,8 +107,35 @@ impl UID {
         UID { inner }
     }
 
+    /// Automatically generates a new unique UID.
+    pub fn generate() -> UID {
+        UID {
+            inner: NEXT_UID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
     pub fn id(&self) -> u8 {
         self.inner
+    }
+}
+
+impl From<u8> for UID {
+    fn from(inner: u8) -> Self {
+        UID { inner }
+    }
+}
+
+impl From<UID> for u8 {
+    fn from(uid: UID) -> Self {
+        uid.inner
+    }
+}
+
+impl std::ops::Deref for UID {
+    type Target = u8;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
