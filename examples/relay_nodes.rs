@@ -32,12 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn listeners on nodes to listen for relayed introductions from the relay
     let listen_handle1 = tokio::spawn(async move {
-        let peer = node1.listen_sibling_introduction().await?;
+        let _peer = node1.listen_sibling_introduction().await?;
         Ok::<Node<2048>, struum_types::StruumError>(node1)
     });
 
     let listen_handle2 = tokio::spawn(async move {
-        let peer = node2.listen_sibling_introduction().await?;
+        let _peer = node2.listen_sibling_introduction().await?;
         Ok::<Node<2048>, struum_types::StruumError>(node2)
     });
 

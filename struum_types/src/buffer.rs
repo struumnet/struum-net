@@ -1,4 +1,6 @@
-#[derive(Debug, Clone)]
+use serde_derive::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Buffer {
     pub name: String,
     pub data: Vec<u8>,

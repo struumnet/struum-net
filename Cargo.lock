@@ -1433,6 +1433,8 @@ name = "struum_kernel"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "serde",
+ "serde_derive",
  "struum_macros",
  "struum_types",
 ]

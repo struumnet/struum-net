@@ -1,6 +1,22 @@
 use std::net::SocketAddr;
+use struum_kernel::Kernel;
+use struum_macros::gpu_type;
 use struum_node::node;
-use struum_types::{StruumError, network::*};
+use struum_types::{Buffer, StruumError, network::*};
+
+#[gpu_type]
+#[derive(Debug, PartialEq)]
+struct Vec2 {
+    x: f32,
+    y: f32,
+}
+
+#[gpu_type]
+#[derive(Debug, PartialEq)]
+struct Param {
+    m: f32,
+    c: f32,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), StruumError> {
@@ -19,10 +35,17 @@ async fn main() -> Result<(), StruumError> {
         .parse()
         .expect("Invalid RELAY_ADDR");
 
-    let mut node = node::Node::<2048>::new(
+    let node_id = std::env::var("NODE_ID")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .map(UID::new)
+        .unwrap_or(UID::new(2));
+
+    let mut node = node::Node::<2048>::with_id(
+        node_id,
         udp_port,
         tcp_port,
-        NodeBackend::OpenGL,
+        NodeBackend::Cpu,
         2,
     ).await?;
 
@@ -45,6 +68,51 @@ async fn main() -> Result<(), StruumError> {
         "Current known peers in embedded coordinator: {:?}",
         node.coordinator.get_nodes()
     );
+
+    let peer_tcp = peer
+        .tcp_addr()
+        .expect("Peer did not provide TCP address");
+    println!("Connecting to peer over TCP at {}...", peer_tcp);
+
+    node.connect_to_peer_addr(peer_tcp).await?;
+    println!("Connected to peer over TCP!");
+
+    // Construct computational task (kernel with GLSL source and buffer bindings)
+    let source = r#"
+        void compute(uint i) {
+            Param p = param[0];
+            Vec2 x = pos[i];
+            output[i] = Vec2(
+                p.m * x.x,
+                p.c * x.y
+            );
+        }
+    "#;
+
+    let mut kernel = Kernel::new(source, "compute");
+    kernel.add_buffer::<Param>(Buffer::new("param", &[Param { m: 3.0, c: 4.0 }]));
+    kernel.add_buffer::<Vec2>(Buffer::new(
+        "pos",
+        &[Vec2 { x: 2.0, y: 5.0 }, Vec2 { x: 4.0, y: 10.0 }],
+    ));
+    kernel.add_buffer::<Vec2>(Buffer::empty::<Vec2>("output", 2));
+    kernel.set_work_buffer("pos");
+    kernel.pack()?;
+
+    println!("Sending kernel to peer over TCP...");
+    node.send_kernel(peer_tcp, "task-1001", &kernel).await?;
+    println!("Kernel sent successfully! Awaiting computation result...");
+
+    let (job_id, sender_id, result_kernel) = node.recv_task_result(&peer_tcp).await?;
+    println!(
+        "Received computation result for job '{}' from peer {}!",
+        job_id, sender_id
+    );
+
+    if let Some(output) = result_kernel.get_buffer("output") {
+        let slice = output.as_slice::<Vec2>();
+        println!("Computed output buffer: {:?}", slice);
+    }
 
     Ok(())
 }

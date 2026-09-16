@@ -9,8 +9,8 @@ use struum_types::{
     StruumError,
     network::{TcpPacket, UdpPacket},
 };
-use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
 /// Network layer is an Abstract layers that allows for any higher-level objects
@@ -27,6 +27,8 @@ pub struct NetworkLayer<const BUF_SIZE: usize> {
     pub tcp_port: u16,
     /// Persistent bound UDP socket used for both receiving and sending.
     pub udp_socket: Arc<UdpSocket>,
+    /// TCP listener bound to tcp_port for accepting incoming connections.
+    pub tcp_listener: TcpListener,
 }
 
 impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
@@ -38,12 +40,19 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         let _ = udp_socket.set_broadcast(true);
         let actual_udp_port = udp_socket.local_addr().map(|a| a.port()).unwrap_or(udp_port);
 
+        let tcp_bind_addr = format!("0.0.0.0:{}", tcp_port);
+        let tcp_listener = TcpListener::bind(&tcp_bind_addr)
+            .await
+            .map_err(|e| StruumError::NetworkConnectionError(format!("Failed to bind TCP port {}: {}", tcp_port, e)))?;
+        let actual_tcp_port = tcp_listener.local_addr().map(|a| a.port()).unwrap_or(tcp_port);
+
         Ok(Self {
             ip: get_local_ip().await?,
             connections: HashMap::default(),
             udp_port: actual_udp_port,
-            tcp_port,
+            tcp_port: actual_tcp_port,
             udp_socket: Arc::new(udp_socket),
+            tcp_listener,
         })
     }
 }
@@ -68,6 +77,22 @@ async fn get_local_ip() -> Result<IpAddr, StruumError> {
 
 impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     /// This methods allows for the nodes to initialize a targeted tcp connection within their own
+    /// Connects to a target TCP address and stores the stream in connections.
+    pub async fn initialize_tcp_connection_addr(
+        &mut self,
+        target_addr: SocketAddr,
+    ) -> Result<(), StruumError> {
+        let stream = TcpStream::connect(target_addr)
+            .await
+            .map_err(|e| NetworkConnectionError(format!("Failed to connect to {}: {}", target_addr, e)))?;
+
+        self.connections
+            .insert(target_addr, Arc::new(Mutex::new(stream)));
+
+        Ok(())
+    }
+
+    /// This methods allows for the nodes to initialize a targeted tcp connection within their own
     /// `NetworkLayer<T>`. To communicate directly with the node.
     pub async fn initialize_tcp_connection(
         &mut self,
@@ -78,14 +103,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             .parse()
             .map_err(|e: AddrParseError| StruumError::NetworkConnectionError(e.to_string()))?;
 
-        let stream = TcpStream::connect(target_addr)
-            .await
-            .map_err(|e| NetworkConnectionError(format!("Failed to connect to {}: {}", target_addr, e)))?;
-
-        self.connections
-            .insert(target_addr, Arc::new(Mutex::new(stream)));
-
-        Ok(())
+        self.initialize_tcp_connection_addr(target_addr).await
     }
 
     /// Broadcasts a UDP packet to the local devices
@@ -163,6 +181,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
 
     /// This methods allows for the nodes to entirely all the data, to the node tcp connection
     /// was initialized using `initialize_tcp_connection()`.
+    /// Uses length-prefixed framing: 4-byte big-endian length header followed by bincode payload.
     pub async fn send_tcp_data(
         &mut self,
         addr: SocketAddr,
@@ -170,6 +189,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     ) -> Result<(), StruumError> {
         let data_serialized =
             bincode::serialize(&data).map_err(|e| NetworkConnectionError(e.to_string()))?;
+        let len = data_serialized.len() as u32;
         let connection = self
             .connections
             .get(&addr)
@@ -179,9 +199,67 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             .clone();
         let mut stream = connection.lock().await;
         stream
+            .write_all(&len.to_be_bytes())
+            .await
+            .map_err(|e| NetworkConnectionError(e.to_string()))?;
+        stream
             .write_all(&data_serialized)
             .await
             .map_err(|e| NetworkConnectionError(e.to_string()))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| NetworkConnectionError(e.to_string()))?;
+        log::debug!("Sent TCP packet ({} bytes) to {}", data_serialized.len(), addr);
         Ok(())
+    }
+
+    /// Accepts an incoming TCP connection, stores it in the connection pool,
+    /// and returns the peer's SocketAddr.
+    pub async fn accept_tcp_connection(&mut self) -> Result<SocketAddr, StruumError> {
+        let (stream, peer_addr) = self
+            .tcp_listener
+            .accept()
+            .await
+            .map_err(|e| NetworkConnectionError(format!("Failed to accept TCP connection: {}", e)))?;
+        log::info!("Accepted TCP connection from {}", peer_addr);
+        self.connections
+            .insert(peer_addr, Arc::new(Mutex::new(stream)));
+        Ok(peer_addr)
+    }
+
+    /// Reads a length-prefixed TcpPacket from an established connection.
+    /// Expects a 4-byte big-endian length header followed by bincode payload.
+    pub async fn recv_tcp_data(
+        &mut self,
+        addr: &SocketAddr,
+    ) -> Result<TcpPacket, StruumError> {
+        let connection = self
+            .connections
+            .get(addr)
+            .ok_or(NetworkConnectionError(
+                format!("No TCP connection found for {}", addr),
+            ))?
+            .clone();
+        let mut stream = connection.lock().await;
+
+        let mut len_buf = [0u8; 4];
+        stream
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(|e| NetworkConnectionError(format!("Failed to read TCP length header from {}: {}", addr, e)))?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+
+        // Read payload
+        let mut payload = vec![0u8; len];
+        stream
+            .read_exact(&mut payload)
+            .await
+            .map_err(|e| NetworkConnectionError(format!("Failed to read TCP payload from {}: {}", addr, e)))?;
+
+        let packet: TcpPacket = bincode::deserialize(&payload)
+            .map_err(|e| StruumError::SerializationError(format!("Failed to deserialize TcpPacket from {}: {}", addr, e)))?;
+        log::debug!("Received TCP packet ({} bytes) from {}", len, addr);
+        Ok(packet)
     }
 }

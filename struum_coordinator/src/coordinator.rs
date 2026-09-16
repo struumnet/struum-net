@@ -75,12 +75,14 @@ mod tests {
             ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38011),
             role: NodeRole::NODE,
             backend: Some(NodeBackend::OpenGL),
+            tcp_port: Some(38012),
         };
         let node2 = NodeDetails {
             id: UID::new(2),
             ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38021),
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
+            tcp_port: Some(38022),
         };
 
         coordinator.register_node(node1.clone());

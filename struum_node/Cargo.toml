@@ -8,6 +8,7 @@ struum_types = {workspace = true}
 struum_network = {workspace = true}
 struum_scheduler = {workspace = true}
 struum_kernel = {workspace = true}
+struum_macros = {workspace = true}
 bincode = { workspace = true }
 bytemuck = { workspace = true }
 tokio = { workspace = true }

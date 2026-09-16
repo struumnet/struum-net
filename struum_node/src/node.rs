@@ -9,7 +9,7 @@ use struum_scheduler::{JobId, JobScheduler};
 use struum_types::StruumError;
 use struum_types::network::{
     HelloPacket, IntroductionPacket, NetworkCommunicator, NetworkCoordinator, NodeBackend,
-    NodeDetails, NodeRole, TaskPacket, TcpPacket, UID, UdpPacket,
+    NodeDetails, NodeRole, ResultPacket, TaskDataPacket, TaskPacket, TcpPacket, UID, UdpPacket,
 };
 
 /// Coordinator component embedded in a `Node`.
@@ -173,6 +173,119 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         self.net.initialize_tcp_connection(peer_ip, peer_port).await
     }
 
+    /// Connects directly to a peer node at the specified SocketAddr over TCP.
+    pub async fn connect_to_peer_addr(&mut self, peer_addr: SocketAddr) -> Result<(), StruumError> {
+        self.net.initialize_tcp_connection_addr(peer_addr).await
+    }
+
+    /// Accepts an incoming TCP connection from a peer node.
+    /// Returns the SocketAddr of the connected peer.
+    pub async fn accept_peer_connection(&mut self) -> Result<SocketAddr, StruumError> {
+        self.net.accept_tcp_connection().await
+    }
+
+    /// Sends a computational task (serialized Kernel with source and buffer bindings) to a peer over TCP.
+    pub async fn send_task_data(
+        &mut self,
+        peer_addr: SocketAddr,
+        task_id: &str,
+        kernel: &Kernel,
+    ) -> Result<(), StruumError> {
+        let kernel_data = bincode::serialize(kernel)
+            .map_err(|e| StruumError::SerializationError(format!("Failed to serialize Kernel: {}", e)))?;
+        let packet = TaskDataPacket::new(task_id.to_string(), self.id, kernel_data);
+        self.net.send_tcp_data(peer_addr, TcpPacket::TASKDATA(packet)).await
+    }
+
+    /// Sends a Kernel directly over TCP to a peer for remote execution.
+    pub async fn send_kernel(
+        &mut self,
+        peer_addr: SocketAddr,
+        task_id: &str,
+        kernel: &Kernel,
+    ) -> Result<(), StruumError> {
+        self.send_task_data(peer_addr, task_id, kernel).await
+    }
+
+    /// Receives a computational task (serialized Kernel with source and buffer bindings) from a peer over TCP.
+    /// Returns (task_id, sender_id, kernel).
+    pub async fn recv_task_data(
+        &mut self,
+        peer_addr: &SocketAddr,
+    ) -> Result<(String, UID, Kernel), StruumError> {
+        let packet = self.net.recv_tcp_data(peer_addr).await?;
+        match packet {
+            TcpPacket::TASKDATA(data_packet) => {
+                let kernel: Kernel = bincode::deserialize(&data_packet.kernel_data)
+                    .map_err(|e| StruumError::SerializationError(format!("Failed to deserialize Kernel: {}", e)))?;
+                Ok((data_packet.task_id, data_packet.sender_id, kernel))
+            }
+            other => Err(StruumError::NetworkConnectionError(format!(
+                "Expected TASKDATA packet, received: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Receives a Kernel sent over TCP by a peer.
+    /// Returns (task_id, sender_id, kernel).
+    pub async fn recv_kernel(
+        &mut self,
+        peer_addr: &SocketAddr,
+    ) -> Result<(String, UID, Kernel), StruumError> {
+        self.recv_task_data(peer_addr).await
+    }
+
+    /// Sends a computation result (serialized Kernel with output data) back to a peer over TCP.
+    pub async fn send_task_result(
+        &mut self,
+        peer_addr: SocketAddr,
+        job_id: &str,
+        result_kernel: &Kernel,
+    ) -> Result<(), StruumError> {
+        let result_data = bincode::serialize(result_kernel)
+            .map_err(|e| StruumError::SerializationError(format!("Failed to serialize result Kernel: {}", e)))?;
+        let packet = ResultPacket::new(job_id.to_string(), self.id, result_data);
+        self.net.send_tcp_data(peer_addr, TcpPacket::RESULT(packet)).await
+    }
+
+    /// Receives a computation result from a peer over TCP.
+    /// Returns (job_id, sender_id, kernel).
+    pub async fn recv_task_result(
+        &mut self,
+        peer_addr: &SocketAddr,
+    ) -> Result<(String, UID, Kernel), StruumError> {
+        let packet = self.net.recv_tcp_data(peer_addr).await?;
+        match packet {
+            TcpPacket::RESULT(res) => {
+                let kernel: Kernel = bincode::deserialize(&res.result_data)
+                    .map_err(|e| StruumError::SerializationError(format!("Failed to deserialize result Kernel: {}", e)))?;
+                Ok((res.job_id, res.sender_id, kernel))
+            }
+            other => Err(StruumError::NetworkConnectionError(format!(
+                "Expected RESULT packet, received: {:?}",
+                other
+            ))),
+        }
+    }
+
+    /// Sends any generic TcpPacket to a peer over TCP.
+    pub async fn send_tcp_packet(
+        &mut self,
+        peer_addr: SocketAddr,
+        packet: TcpPacket,
+    ) -> Result<(), StruumError> {
+        self.net.send_tcp_data(peer_addr, packet).await
+    }
+
+    /// Receives any generic TcpPacket from a peer over TCP.
+    pub async fn recv_tcp_packet(
+        &mut self,
+        peer_addr: &SocketAddr,
+    ) -> Result<TcpPacket, StruumError> {
+        self.net.recv_tcp_data(peer_addr).await
+    }
+
     /// Sends a computation task packet to a peer node over TCP.
     pub async fn send_task_to_peer(
         &mut self,
@@ -197,6 +310,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             ip: SocketAddr::new(self.net.ip, self.net.udp_port),
             role: NodeRole::NODE,
             backend: Some(self.backend),
+            tcp_port: Some(self.net.tcp_port),
         }
     }
 
@@ -275,6 +389,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                     ip: node_b.ip,
                     role: node_b.role,
                     backend: node_b.backend,
+                    tcp_port: node_b.tcp_port,
                 }),
                 node_a.ip,
             )
@@ -288,6 +403,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                     ip: node_a.ip,
                     role: node_a.role,
                     backend: node_a.backend,
+                    tcp_port: node_a.tcp_port,
                 }),
                 node_b.ip,
             )
@@ -325,6 +441,7 @@ impl<const BUF_SIZE: usize> NetworkCommunicator for Node<BUF_SIZE> {
                     ip: SocketAddr::new(self.net.ip, self.net.udp_port),
                     role: NodeRole::NODE,
                     backend: Some(self.backend),
+                    tcp_port: Some(self.net.tcp_port),
                 }),
                 ip,
             )
@@ -400,8 +517,11 @@ mod tests {
         c: f32,
     }
 
+    static GL_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn test_node_intra_node_thread_scheduling() {
+        let _lock = GL_TEST_MUTEX.lock().unwrap();
         let mut node = Node::<1024>::with_id(UID::new(10), 38111, 38112, NodeBackend::OpenGL, 2)
             .await
             .expect("Failed to initialize Node");
@@ -460,6 +580,7 @@ mod tests {
         assert_eq!(details.ip.port(), 38221);
         assert_eq!(details.role, NodeRole::NODE);
         assert_eq!(details.backend, Some(NodeBackend::Cpu));
+        assert_eq!(details.tcp_port, Some(38222));
 
         // Test From<&Node>
         let from_ref = NodeDetails::from(&node);
@@ -481,12 +602,14 @@ mod tests {
             ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38341),
             role: NodeRole::NODE,
             backend: Some(NodeBackend::OpenGL),
+            tcp_port: Some(38342),
         };
         let peer2 = NodeDetails {
             id: UID::new(102),
             ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38351),
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
+            tcp_port: Some(38352),
         };
 
         // Access via node delegation
@@ -508,5 +631,91 @@ mod tests {
         node.deregister_node(&UID::new(101));
         assert_eq!(node.get_node(&UID::new(101)), None);
         assert_eq!(node.node_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tcp_task_data_transfer() {
+        let _lock = GL_TEST_MUTEX.lock().unwrap();
+        // Node 1 (Sender / Requester)
+        let mut node1 = Node::<1024>::with_id(UID::new(1), 38411, 38412, NodeBackend::Cpu, 1)
+            .await
+            .expect("Failed to initialize Node 1");
+
+        // Node 2 (Receiver / Worker)
+        let mut node2 = Node::<1024>::with_id(UID::new(2), 38421, 38422, NodeBackend::OpenGL, 2)
+            .await
+            .expect("Failed to initialize Node 2");
+
+        let node2_tcp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), node2.net.tcp_port);
+
+        // Spawn receiver task on Node 2
+        let receiver_task = tokio::spawn(async move {
+            let conn_peer = node2.accept_peer_connection().await.unwrap();
+            let (task_id, sender_id, kernel) = node2.recv_kernel(&conn_peer).await.unwrap();
+            assert_eq!(task_id, "job-test-42");
+            assert_eq!(sender_id, UID::new(1));
+
+            // Verify that bindings and source transferred faithfully
+            let pos_buf = kernel.get_buffer("pos").expect("Expected pos buffer");
+            let pos_slice = pos_buf.as_slice::<Vec2>();
+            assert_eq!(pos_slice.len(), 2);
+            assert_eq!(pos_slice[0], Vec2 { x: 2.0, y: 5.0 });
+
+            // Execute the computation remotely using node2's worker threads
+            let local_job_id = node2.submit_job(kernel).await;
+            let completed = node2.recv_completed_job().await.expect("Expected completed job ID");
+            assert_eq!(completed, local_job_id);
+
+            let result_kernel = node2.get_job_result(&completed).await.expect("Expected result kernel");
+
+            // Send result back to requester over TCP
+            node2.send_task_result(conn_peer, &task_id, &result_kernel).await.unwrap();
+        });
+
+        // Sender connects to Node 2 over TCP
+        node1.connect_to_peer_addr(node2_tcp_addr).await.expect("Failed to connect to peer TCP");
+
+        // Prepare computation kernel with source and buffer bindings
+        let source = r#"
+            void compute(uint i) {
+                Param p = param[0];
+                Vec2 x = pos[i];
+                output[i] = Vec2(
+                    p.m * x.x,
+                    p.c * x.y
+                );
+            }
+        "#;
+
+        let mut kernel = Kernel::new(source, "compute");
+        kernel.add_buffer::<Param>(Buffer::new("param", &[Param { m: 3.0, c: 4.0 }]));
+        kernel.add_buffer::<Vec2>(Buffer::new(
+            "pos",
+            &[Vec2 { x: 2.0, y: 5.0 }, Vec2 { x: 4.0, y: 10.0 }],
+        ));
+        kernel.add_buffer::<Vec2>(Buffer::empty::<Vec2>("output", 2));
+        kernel.set_work_buffer("pos");
+        kernel.pack().unwrap();
+
+        // Node 1 sends kernel to Node 2 over TCP
+        node1.send_kernel(node2_tcp_addr, "job-test-42", &kernel)
+            .await
+            .expect("Failed to send kernel over TCP");
+
+        // Node 1 receives computation result from Node 2 over TCP
+        let (job_id, sender_id, result_kernel) = node1.recv_task_result(&node2_tcp_addr)
+            .await
+            .expect("Failed to receive task result over TCP");
+
+        assert_eq!(job_id, "job-test-42");
+        assert_eq!(sender_id, UID::new(2));
+
+        let output = result_kernel.get_buffer("output").expect("Expected output buffer");
+        let slice = output.as_slice::<Vec2>();
+        assert_eq!(slice.len(), 2);
+        assert_eq!(slice[0], Vec2 { x: 6.0, y: 20.0 });
+        assert_eq!(slice[1], Vec2 { x: 12.0, y: 40.0 });
+
+        receiver_task.await.unwrap();
     }
 }

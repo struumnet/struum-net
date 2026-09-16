@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde_derive::{Deserialize, Serialize};
 use struum_types::{Buffer, GPUType, StruumError, is_builtin_gpu_type};
 
 // TODO(slok): Support multiple backend types
@@ -7,12 +8,14 @@ use struum_types::{Buffer, GPUType, StruumError, is_builtin_gpu_type};
 // 256 might be enough of invocations needed per work group
 // but if it created a bottleneck then figure something out
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufferBinding {
     pub buffer: Buffer,
-    pub gpu_type: &'static str,
+    pub gpu_type: String,
     pub gpu_struct: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Kernel {
     source: String,
     entry_point: String,
@@ -42,7 +45,7 @@ impl Kernel {
     pub fn add_buffer<T: GPUType>(&mut self, buffer: Buffer) {
         self.buffer_bindings.push(BufferBinding {
             buffer: buffer,
-            gpu_type: T::glsl_type(),
+            gpu_type: T::glsl_type().to_string(),
             gpu_struct: T::glsl(),
         });
     }
@@ -125,7 +128,7 @@ impl Kernel {
 
         // Generating structs
         for binding in &self.buffer_bindings {
-            if structs.insert(binding.gpu_type) {
+            if structs.insert(binding.gpu_type.clone()) {
                 source.push_str(&binding.gpu_struct);
                 source.push_str("\n\n");
             }

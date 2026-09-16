@@ -64,6 +64,7 @@ impl<const BUF_SIZE: usize> RelayServer<BUF_SIZE> {
                             ip: details.ip,
                             role: details.role,
                             backend: details.backend,
+                            tcp_port: details.tcp_port,
                         }),
                         existing_node.ip,
                     )
@@ -77,6 +78,7 @@ impl<const BUF_SIZE: usize> RelayServer<BUF_SIZE> {
                             ip: existing_node.ip,
                             role: existing_node.role,
                             backend: existing_node.backend,
+                            tcp_port: existing_node.tcp_port,
                         }),
                         details.ip,
                     )
@@ -133,12 +135,14 @@ mod tests {
             ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38711),
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
+            tcp_port: Some(38712),
         };
         let node2 = NodeDetails {
             id: UID::new(20),
             ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38721),
             role: NodeRole::NODE,
             backend: Some(NodeBackend::OpenGL),
+            tcp_port: Some(38722),
         };
 
         relay.register_and_relay_node(node1.clone()).await.unwrap();

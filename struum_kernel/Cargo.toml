@@ -7,3 +7,5 @@ edition = "2024"
 struum_types = { workspace = true }
 struum_macros = { workspace = true }
 regex = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
