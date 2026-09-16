@@ -11,12 +11,11 @@ pub struct OpenglBackend {
     shader: Shader,
     gl_buffers: HashMap<String, GlBuffer>,
     group_size: u32,
-    _context: GlContext,
 }
 
 impl OpenglBackend {
     pub fn new(shader: &str, buffers: &[Buffer], group_size: u32) -> Result<Self, StruumError> {
-        let context = GlContext::new()?;
+        GlContext::ensure_current()?;
 
         // Compile Shader
         let shader = Shader::new(shader)?;
@@ -31,15 +30,14 @@ impl OpenglBackend {
         }
 
         Ok(Self {
-            shader: shader,
-            gl_buffers: gl_buffers,
-            group_size: group_size,
-            _context: context,
+            shader,
+            gl_buffers,
+            group_size,
         })
     }
 
     pub fn from_kernel(kernel: &Kernel) -> Result<Self, StruumError> {
-        let context = GlContext::new()?;
+        GlContext::ensure_current()?;
 
         // Compile Shader
         let shader = Shader::new(
@@ -67,10 +65,9 @@ impl OpenglBackend {
             ))?;
 
         Ok(Self {
-            shader: shader,
-            gl_buffers: gl_buffers,
-            group_size: group_size,
-            _context: context,
+            shader,
+            gl_buffers,
+            group_size,
         })
     }
 

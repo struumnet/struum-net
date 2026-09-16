@@ -1,14 +1,42 @@
 use glfw::Context;
+use std::cell::RefCell;
 use std::ffi::c_void;
 use struum_types::StruumError;
+
+thread_local! {
+    static THREAD_GL_CONTEXT: RefCell<Option<GlContext>> = const { RefCell::new(None) };
+}
 
 pub(crate) struct GlContext {
     _glfw: glfw::Glfw,
     _window: glfw::PWindow,
 }
 
+static INIT_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 impl GlContext {
+    pub(crate) fn ensure_current() -> Result<(), StruumError> {
+        THREAD_GL_CONTEXT.with(|cell| {
+            let mut opt = cell.borrow_mut();
+            if opt.is_none() {
+                let ctx = Self::new()?;
+                *opt = Some(ctx);
+            }
+            Ok(())
+        })
+    }
+
     pub(crate) fn new() -> Result<Self, StruumError> {
+        let _guard = INIT_MUTEX.lock().unwrap();
+
+        // On Linux X11/Mesa with certain GPU drivers, DRI3 negotiation for
+        // invisible offscreen windows can fail
+        if std::env::var_os("LIBGL_DRI3_DISABLE").is_none() {
+            unsafe {
+                std::env::set_var("LIBGL_DRI3_DISABLE", "1");
+            }
+        }
+
         let mut glfw = glfw::init(glfw::log_errors)
             .map_err(|e| StruumError::GlContextCreationError(e.to_string()))?;
 
