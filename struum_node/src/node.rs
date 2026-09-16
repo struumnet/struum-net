@@ -97,6 +97,8 @@ pub struct Node<const BUF_SIZE: usize> {
     pub job_rx: Receiver<JobId>,
     /// Embedded Coordinator component managing known peer nodes.
     pub coordinator: Coordinator,
+    /// Configured relay server address for registration polling.
+    pub relay_addr: Option<SocketAddr>,
 }
 
 impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
@@ -106,6 +108,7 @@ impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
             .field("net", &self.net)
             .field("backend", &self.backend)
             .field("peers_count", &self.coordinator.node_count())
+            .field("relay_addr", &self.relay_addr)
             .finish()
     }
 }
@@ -149,6 +152,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             scheduler,
             job_rx,
             coordinator: Coordinator::new(),
+            relay_addr: None,
         })
     }
 
@@ -324,20 +328,122 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         self.net.send_tcp_data(peer_addr, TcpPacket::TASK(task)).await
     }
 
-    /// Listens for an introduction packet sent by the coordinator or relay introducing a sibling node.
-    pub async fn listen_sibling_introduction(&mut self) -> Result<NodeDetails, StruumError> {
-        log::debug!("Node {} waiting for peer introduction packet...", self.id);
-        let intro = self.listen_introduction().await?;
-        let details = NodeDetails::from(intro);
-        self.coordinator.register_node(details.clone());
+    pub async fn long_poll_relay(&mut self, relay_addr: SocketAddr) -> Result<NodeDetails, StruumError> {
+        self.long_poll_relay_with_interval(relay_addr, std::time::Duration::from_millis(1000)).await
+    }
+
+    /// Long-polls connection requests to the relay server with a configurable poll interval.
+    pub async fn long_poll_relay_with_interval(
+        &mut self,
+        relay_addr: SocketAddr,
+        interval: std::time::Duration,
+    ) -> Result<NodeDetails, StruumError> {
+        self.relay_addr = Some(relay_addr);
+        log::info!("Node {} long-polling connection request to relay at {}...", self.id, relay_addr);
+
+        loop {
+            let _ = self.introduce(relay_addr).await;
+
+            tokio::select! {
+                res = self.listen_introduction() => {
+                    let intro = res?;
+                    let details = NodeDetails::from(intro);
+                    self.coordinator.register_node(details.clone());
+                    log::info!(
+                        "Node {} successfully connected to relay! Received peer {} at {} (TCP: {:?})",
+                        self.id,
+                        details.id,
+                        details.ip,
+                        details.tcp_port
+                    );
+                    return Ok(details);
+                }
+                _ = tokio::time::sleep(interval) => {
+                    log::debug!("Node {} polling relay at {} for peer introduction...", self.id, relay_addr);
+                }
+            }
+        }
+    }
+
+    pub async fn long_poll_relay_for_peers(
+        &mut self,
+        relay_addr: SocketAddr,
+        min_peers: usize,
+    ) -> Result<Vec<NodeDetails>, StruumError> {
+        self.long_poll_relay_for_peers_with_interval(
+            relay_addr,
+            min_peers,
+            std::time::Duration::from_millis(1000),
+        ).await
+    }
+
+    /// Long-polls connection requests to the relay server until at least `min_peers` peer nodes
+    /// are discovered with a configurable poll interval.
+    pub async fn long_poll_relay_for_peers_with_interval(
+        &mut self,
+        relay_addr: SocketAddr,
+        min_peers: usize,
+        interval: std::time::Duration,
+    ) -> Result<Vec<NodeDetails>, StruumError> {
+        self.relay_addr = Some(relay_addr);
         log::info!(
-            "Node {} received and registered peer {} at {} (TCP: {:?})",
+            "Node {} long-polling relay at {} for {} peer(s)...",
             self.id,
-            details.id,
-            details.ip,
-            details.tcp_port
+            relay_addr,
+            min_peers
         );
-        Ok(details)
+
+        while self.coordinator.node_count() < min_peers {
+            let _ = self.introduce(relay_addr).await;
+
+            tokio::select! {
+                res = self.listen_introduction() => {
+                    if let Ok(intro) = res {
+                        let details = NodeDetails::from(intro);
+                        self.coordinator.register_node(details);
+                    }
+                }
+                _ = tokio::time::sleep(interval) => {
+                    log::debug!(
+                        "Node {} polling relay at {} ({}/{} peers discovered)...",
+                        self.id,
+                        relay_addr,
+                        self.coordinator.node_count(),
+                        min_peers
+                    );
+                }
+            }
+        }
+
+        Ok(self.coordinator.get_nodes())
+    }
+
+    /// Listens for an introduction packet sent by the coordinator or relay introducing a sibling node.
+    /// If a relay address was configured, it delegates to `long_poll_relay` to ensure resilience
+    /// against delayed relay startup and dropped UDP packets.
+    pub async fn listen_sibling_introduction(&mut self) -> Result<NodeDetails, StruumError> {
+        match self.relay_addr {
+            Some(relay_addr) => self.long_poll_relay(relay_addr).await,
+            None => {
+                log::debug!("Node {} waiting for peer introduction packet...", self.id);
+                let intro = self.listen_introduction().await?;
+                let details = NodeDetails::from(intro);
+                self.coordinator.register_node(details.clone());
+                log::info!(
+                    "Node {} received and registered peer {} at {} (TCP: {:?})",
+                    self.id,
+                    details.id,
+                    details.ip,
+                    details.tcp_port
+                );
+                Ok(details)
+            }
+        }
+    }
+
+    /// Registers with a relay server and polls until a peer node is introduced.
+    pub async fn register_and_wait_for_peer(&mut self, relay_addr: SocketAddr) -> Result<NodeDetails, StruumError> {
+        self.long_poll_relay(relay_addr).await
     }
 
     /// Returns the NodeDetails describing this node.
@@ -401,6 +507,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
     /// Registers this node with a remote relay server by sending an Introduction packet.
     pub async fn register_to_relay(&mut self, relay_addr: SocketAddr) -> Result<(), StruumError> {
+        self.relay_addr = Some(relay_addr);
         log::info!("Node {} sending registration packet to relay at {}...", self.id, relay_addr);
         self.introduce(relay_addr).await
     }
@@ -539,6 +646,7 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
     use struum_macros::gpu_type;
+    use struum_relay::RelayServer;
     use struum_types::Buffer;
 
     #[gpu_type]
@@ -756,4 +864,66 @@ mod tests {
 
         receiver_task.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_delayed_relay_startup_polling() {
+        let _lock = GL_TEST_MUTEX.lock().unwrap();
+
+        let relay_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38901);
+
+        // Node 1 & Node 2 start BEFORE the relay server is created or running
+        let mut node1 = Node::<1024>::with_id(UID::new(1), 38911, 38912, NodeBackend::Cpu, 1)
+            .await
+            .expect("Failed to initialize Node 1");
+        let mut node2 = Node::<1024>::with_id(UID::new(2), 38921, 38922, NodeBackend::Cpu, 1)
+            .await
+            .expect("Failed to initialize Node 2");
+
+        // Spawn async tasks for both nodes long-polling the offline relay
+        let n1_handle = tokio::spawn(async move {
+            node1.long_poll_relay(relay_addr).await
+        });
+        let n2_handle = tokio::spawn(async move {
+            node2.long_poll_relay(relay_addr).await
+        });
+
+        // Simulate relay downtime: wait 1.5 seconds while nodes are long-polling
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        // Verify neither task has completed yet since relay was offline
+        assert!(!n1_handle.is_finished());
+        assert!(!n2_handle.is_finished());
+
+        // NOW start the relay server
+        let mut relay = RelayServer::<1024>::new(38901, 38902)
+            .await
+            .expect("Failed to create RelayServer");
+
+        let relay_handle = tokio::spawn(async move {
+            let _ = relay.run().await;
+        });
+
+        // Await introductions with a timeout
+        let n1_peer = tokio::time::timeout(std::time::Duration::from_secs(5), n1_handle)
+            .await
+            .expect("Timed out waiting for Node 1 peer introduction")
+            .unwrap()
+            .expect("Node 1 failed to receive peer introduction");
+
+        let n2_peer = tokio::time::timeout(std::time::Duration::from_secs(5), n2_handle)
+            .await
+            .expect("Timed out waiting for Node 2 peer introduction")
+            .unwrap()
+            .expect("Node 2 failed to receive peer introduction");
+
+        // Verify Node 1 discovered Node 2 and vice versa
+        assert_eq!(n1_peer.id, UID::new(2));
+        assert_eq!(n1_peer.tcp_port, Some(38922));
+
+        assert_eq!(n2_peer.id, UID::new(1));
+        assert_eq!(n2_peer.tcp_port, Some(38912));
+
+        relay_handle.abort();
+    }
 }
+

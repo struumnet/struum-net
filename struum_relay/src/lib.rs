@@ -38,12 +38,21 @@ impl<const BUF_SIZE: usize> RelayServer<BUF_SIZE> {
     /// Registers a node and immediately relays its IP to all other registered nodes,
     /// while sending existing nodes' IPs to the new node.
     pub async fn register_and_relay_node(&mut self, details: NodeDetails) -> Result<(), StruumError> {
-        log::info!(
-            "Relay registered node {} at IP {} (backend: {:?})",
-            details.id,
-            details.ip,
-            details.backend
-        );
+        let is_new = !self.registered_nodes.contains_key(&details.id);
+        if is_new {
+            log::info!(
+                "Relay registered node {} at IP {} (backend: {:?})",
+                details.id,
+                details.ip,
+                details.backend
+            );
+        } else {
+            log::debug!(
+                "Relay refreshed registration for node {} at IP {}",
+                details.id,
+                details.ip
+            );
+        }
 
         // Relay between the newly registered node and all existing nodes
         for (existing_id, existing_node) in &self.registered_nodes {

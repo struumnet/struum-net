@@ -46,12 +46,8 @@ async fn main() -> Result<(), StruumError> {
         "We are: [UID] {} [IP] {} [UDP-PORT] {} [TCP-PORT] {}",
         node.id, node.net.ip, node.net.udp_port, node.net.tcp_port
     );
-    log::info!("Sending registration request to relay at {}...", relay_addr);
-
-    node.register_to_relay(relay_addr).await?;
-    log::info!("Waiting for relayed peer introductions from relay...");
-
-    let peer = node.listen_sibling_introduction().await?;
+    log::info!("Connecting and long-polling relay at {}...", relay_addr);
+    let peer = node.long_poll_relay(relay_addr).await?;
     log::info!(
         "Successfully connected! Received peer introduction: UID {} at {}",
         peer.id, peer.ip

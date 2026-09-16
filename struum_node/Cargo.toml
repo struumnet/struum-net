@@ -30,4 +30,6 @@ path = "src/listener/main.rs"
 [dev-dependencies]
 struum_macros = { workspace = true }
 bytemuck = { workspace = true }
+struum_relay = { workspace = true }
+
 

@@ -67,8 +67,7 @@ async fn main() -> Result<(), StruumError> {
 
     let mut node = node::Node::<2048>::with_id(node_id, udp_port, tcp_port, NodeBackend::Cpu, 1).await?;
 
-    node.register_to_relay(relay_addr).await?;
-    let peer = node.listen_sibling_introduction().await?;
+    let peer = node.long_poll_relay(relay_addr).await?;
     let peer_tcp = peer.tcp_addr().expect("Peer did not provide TCP address");
     node.connect_to_peer_addr(peer_tcp).await?;
 

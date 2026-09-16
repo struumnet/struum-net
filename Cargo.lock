@@ -1472,6 +1472,7 @@ dependencies = [
  "struum_kernel",
  "struum_macros",
  "struum_network",
+ "struum_relay",
  "struum_scheduler",
  "struum_types",
  "tokio",

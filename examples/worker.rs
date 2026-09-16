@@ -41,8 +41,7 @@ async fn main() -> Result<(), StruumError> {
 
     let mut node = node::Node::<2048>::with_id(node_id, udp_port, tcp_port, NodeBackend::OpenGL, 1).await?;
 
-    node.register_to_relay(relay_addr).await?;
-    let _peer = node.listen_sibling_introduction().await?;
+    let _peer = node.long_poll_relay(relay_addr).await?;
     let peer_conn_addr = node.accept_peer_connection().await?;
 
     loop {
