@@ -6,7 +6,10 @@ edition = "2024"
 [dependencies]
 struum_types = {workspace = true}
 struum_network = {workspace = true}
+struum_scheduler = {workspace = true}
+struum_kernel = {workspace = true}
 bincode = { workspace = true }
+bytemuck = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 
@@ -20,4 +23,8 @@ path = "src/hello/main.rs"
 [[bin]]
 name = "listener"
 path = "src/listener/main.rs"
+
+[dev-dependencies]
+struum_macros = { workspace = true }
+bytemuck = { workspace = true }
 

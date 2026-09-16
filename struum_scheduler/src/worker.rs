@@ -7,6 +7,7 @@ use crate::state::SchedulerState;
 use crate::job::JobId;
 
 pub(crate) async fn worker(state: Arc<Mutex<SchedulerState>>, tx: Sender<JobId>) {
+    // T_T ???
     loop {
         let job = {
             let mut state = state.lock().await;

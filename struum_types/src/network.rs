@@ -23,34 +23,47 @@ pub enum NodeState {
     WORKING,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum UdpPacket {
     HELLO(HelloPacket),
     INTRODUCTION(IntroductionPacket),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TcpPacket {
     TASK(TaskPacket),
     REGISTERTASK(RegisterTaskPacket),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RegisterTaskPacket {
-    input: u8, // PLACEHOLDER
-    task_inner: String,
+    pub input: u8,
+    pub task_inner: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl RegisterTaskPacket {
+    pub fn new(input: u8, task_inner: String) -> Self {
+        Self { input, task_inner }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TaskPacket {
-    id: UID, // PLACEHOLDER
+    pub id: UID,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl TaskPacket {
+    pub fn new(id: UID) -> Self {
+        Self { id }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct HelloPacket {}
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct IntroductionPacket {
+    pub id: UID,
     pub ip: SocketAddr,
     pub role: NodeRole,
     pub backend: Option<NodeBackend>,
@@ -58,36 +71,57 @@ pub struct IntroductionPacket {
 
 impl From<IntroductionPacket> for NodeDetails {
     fn from(packet: IntroductionPacket) -> Self {
-        NodeDetails { ip: packet.ip, role: packet.role, backend: packet.backend }
+        NodeDetails { id: packet.id, ip: packet.ip, role: packet.role, backend: packet.backend }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct NodeDetails {
+    pub id: UID,
     pub ip: SocketAddr,
     pub role: NodeRole,
     pub backend: Option<NodeBackend>,
 }
 
-#[derive(Default, Deserialize, Serialize, Debug,PartialEq,Eq,Hash)]
+#[derive(
+    Default,
+    Deserialize,
+    Serialize,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Clone,
+    Copy,
+)]
 pub struct UID {
     inner: u8,
 }
 
 impl UID {
     pub fn new(inner: u8) -> UID {
-        return UID { inner };
+        UID { inner }
+    }
+
+    pub fn id(&self) -> u8 {
+        self.inner
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+impl std::fmt::Display for UID {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UID({})", self.inner)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 pub enum NodeBackend {
     OpenGL,
     Vulkan,
     Cpu,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 pub enum NodeRole {
     COORDINATOR,
     NODE,
@@ -99,10 +133,8 @@ pub trait NetworkCommunicator {
     async fn notify_network(&mut self) -> Result<(), StruumError>;
     /// This method is used by a `Node` and sends `IntroductionPacket` to the `Coordinator`
     /// to register itself to the network.
-    async fn introduce(&mut self,ip: SocketAddr) -> Result<(), StruumError>;
+    async fn introduce(&mut self, ip: SocketAddr) -> Result<(), StruumError>;
 
-
-    // TODO: MIGHT HAVE TO IMPROVE ON THIS
     /// Hello request listener
     async fn listen_hello(&mut self) -> Result<SocketAddr, StruumError>;
     /// Introduction listener
@@ -111,21 +143,12 @@ pub trait NetworkCommunicator {
 
 #[async_trait]
 pub trait NetworkCoordinator {
-    /// This method is used if a node is missing the information of
-    /// any sibling nodes, and the `Coordinator` introduces through
-    /// information on the map.
-    async fn introduce_sibling_node(&mut self,node_id: &UID) -> Result<&NodeDetails, StruumError>;
+    /// Looks up a registered node by ID in the coordinator.
+    async fn introduce_sibling_node(&mut self, node_id: &UID) -> Result<&NodeDetails, StruumError>;
 
-    /// This method is used to best described as a session initiation protocol
-    /// E.g.
-    ///
-    /// PRE:
-    ///       `Coordinator`
-    ///      |           |
-    /// `Node` A          `Node` B
-    ///
-    /// POST:
-    /// `Node` A <------> `Node` B
-    ///
+    /// Introduces two sibling nodes to each other by sending each node's introduction to the other.
+    async fn introduce_nodes(&mut self, node_a_id: &UID, node_b_id: &UID) -> Result<(), StruumError>;
+
+    /// Initiates information exchange between registered nodes (e.g. mesh introduction).
     async fn establish_information_exchange(&mut self) -> Result<(), StruumError>;
 }

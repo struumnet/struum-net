@@ -1226,6 +1226,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_derive",
+ "struum_coordinator",
  "struum_kernel",
  "struum_macros",
  "struum_network",
@@ -1245,6 +1246,7 @@ dependencies = [
  "async-trait",
  "struum_network",
  "struum_types",
+ "tokio",
 ]
 
 [[package]]
@@ -1282,7 +1284,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bincode",
+ "bytemuck",
+ "struum_kernel",
+ "struum_macros",
  "struum_network",
+ "struum_scheduler",
  "struum_types",
  "tokio",
 ]

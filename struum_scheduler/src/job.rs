@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use struum_kernel::Kernel;
 
-pub(crate) type JobId = String;
+pub type JobId = String;
 
 pub(crate) struct Job {
     pub(crate) id: JobId,
