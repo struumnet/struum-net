@@ -10,7 +10,7 @@ use struum_types::{
     network::{TcpPacket, UdpPacket},
 };
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpSocket, TcpStream, UdpSocket};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
 /// Network layer is an Abstract layers that allows for any higher-level objects
@@ -25,19 +25,28 @@ pub struct NetworkLayer<const BUF_SIZE: usize> {
     pub udp_port: u16,
     /// A reserved port to be used by the OS for TCP communication.
     pub tcp_port: u16,
+    /// Persistent bound UDP socket used for both receiving and sending.
+    pub udp_socket: Arc<UdpSocket>,
 }
 
 impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     pub async fn new(udp_port: u16, tcp_port: u16) -> Result<Self, StruumError> {
-            Ok(Self {
-                ip: get_local_ip().await?,
-                connections: HashMap::default(),
-                udp_port,
-                tcp_port,
-            })
-        }
-}
+        let bind_addr = format!("0.0.0.0:{}", udp_port);
+        let udp_socket = UdpSocket::bind(&bind_addr)
+            .await
+            .map_err(|e| StruumError::NetworkConnectionError(format!("Failed to bind UDP port {}: {}", udp_port, e)))?;
+        let _ = udp_socket.set_broadcast(true);
+        let actual_udp_port = udp_socket.local_addr().map(|a| a.port()).unwrap_or(udp_port);
 
+        Ok(Self {
+            ip: get_local_ip().await?,
+            connections: HashMap::default(),
+            udp_port: actual_udp_port,
+            tcp_port,
+            udp_socket: Arc::new(udp_socket),
+        })
+    }
+}
 
 /// Gives a local IP address for the NetworkLayer
 async fn get_local_ip() -> Result<IpAddr, StruumError> {
@@ -49,7 +58,7 @@ async fn get_local_ip() -> Result<IpAddr, StruumError> {
     socket
         .connect("8.8.8.8:80")
         .await
-        .map_err(|e|{StruumError::NetworkConnectionError(e.to_string())})?;
+        .map_err(|e| StruumError::NetworkConnectionError(e.to_string()))?;
 
     Ok(socket
         .local_addr()
@@ -65,33 +74,22 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         target_ip: &str,
         target_port: u16,
     ) -> Result<(), StruumError> {
-        let self_addr = format!("0.0.0.0:{}", self.tcp_port)
+        let target_addr: SocketAddr = format!("{}:{}", target_ip, target_port)
             .parse()
             .map_err(|e: AddrParseError| StruumError::NetworkConnectionError(e.to_string()))?;
-        let target_addr = format!("{}:{}", target_ip, target_port)
-            .parse()
-            .map_err(|e: AddrParseError| StruumError::NetworkConnectionError(e.to_string()))?;
-        let socket =
-            TcpSocket::new_v4().map_err(|e| StruumError::NetworkConnectionError(e.to_string()))?;
-        socket
-            .bind(self_addr)
-            .map_err(|e| NetworkConnectionError(e.to_string()))?;
 
-        let conn = socket
-            .connect(target_addr)
+        let stream = TcpStream::connect(target_addr)
             .await
-            .map_err(|e| NetworkConnectionError(e.to_string()))?;
+            .map_err(|e| NetworkConnectionError(format!("Failed to connect to {}: {}", target_addr, e)))?;
+
         self.connections
-            .insert(target_addr, Arc::new(Mutex::new(conn)));
+            .insert(target_addr, Arc::new(Mutex::new(stream)));
 
         Ok(())
     }
 
     /// Broadcasts a UDP packet to the local devices
     pub async fn broadcast(&mut self, packet: UdpPacket) -> Result<(), StruumError> {
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .await
-            .map_err(|e| StruumError::NetworkConnectionError(e.to_string()))?;
         let mut buf: Vec<u8>;
         match packet {
             UdpPacket::HELLO(data) => {
@@ -105,17 +103,12 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
                 })?;
             }
         }
-        socket.set_broadcast(true).map_err(|_| {
-            StruumError::NetworkConnectionError("Couldn't enable broadcast!".to_string())
-        })?;
 
-        socket
+        self.udp_socket
             .send_to(&mut buf, format!("255.255.255.255:{}", self.udp_port))
             .await
-            .map_err(|_| {
-                StruumError::NetworkConnectionError(
-                    "Couldn't receive a broadcast connection!".to_string(),
-                )
+            .map_err(|e| {
+                StruumError::NetworkConnectionError(format!("Failed to broadcast packet: {}", e))
             })?;
 
         Ok(())
@@ -126,9 +119,6 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         packet: UdpPacket,
         addr: SocketAddr,
     ) -> Result<(), StruumError> {
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .await
-            .map_err(|e| StruumError::NetworkConnectionError(e.to_string()))?;
         let mut buf: Vec<u8>;
         match packet {
             UdpPacket::HELLO(data) => {
@@ -143,11 +133,12 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             }
         }
 
-        socket.send_to(&mut buf, addr).await.map_err(|_| {
-            StruumError::NetworkConnectionError(
-                "Couldn't receive a broadcast connection!".to_string(),
-            )
-        })?;
+        self.udp_socket
+            .send_to(&mut buf, addr)
+            .await
+            .map_err(|e| {
+                StruumError::NetworkConnectionError(format!("Failed to send UDP packet to {}: {}", addr, e))
+            })?;
 
         Ok(())
     }
@@ -156,16 +147,14 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     pub async fn listen_udp<T: Debug + for<'a> Deserialize<'a>>(
         &mut self,
     ) -> Result<(T, SocketAddr), StruumError> {
-        let socket = UdpSocket::bind(format!("{}:{}",self.ip, self.udp_port))
-            .await
-            .map_err(|e| StruumError::NetworkConnectionError(e.to_string()))?;
         let mut buf = [0; BUF_SIZE];
 
-        let (amt, src) = socket.recv_from(&mut buf).await.map_err(|_| {
-            StruumError::NetworkConnectionError(
-                "Couldn't receive a broadcast connection!".to_string(),
-            )
-        })?;
+        let (amt, src) = self.udp_socket
+            .recv_from(&mut buf)
+            .await
+            .map_err(|e| {
+                StruumError::NetworkConnectionError(format!("Failed to receive UDP packet: {}", e))
+            })?;
         let message = bincode::deserialize::<T>(&buf[..amt])
             .map_err(|e| StruumError::SerializationError(e.to_string()))?;
         log::debug!("Received {:?} from {:?}", message, src);
@@ -173,7 +162,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     }
 
     /// This methods allows for the nodes to entirely all the data, to the node tcp connection
-    /// was initialized using `initialize_connectionsnection()`.
+    /// was initialized using `initialize_tcp_connection()`.
     pub async fn send_tcp_data(
         &mut self,
         addr: SocketAddr,

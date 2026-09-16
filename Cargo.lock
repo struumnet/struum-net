@@ -1465,6 +1465,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "bytemuck",
+ "env_logger",
  "log",
  "struum_kernel",
  "struum_macros",
