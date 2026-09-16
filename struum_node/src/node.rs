@@ -333,15 +333,31 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     }
 
     /// Long-polls connection requests to the relay server with a configurable poll interval.
+    /// If any peer already exists in the node's coordinator, relay polling is skipped.
     pub async fn long_poll_relay_with_interval(
         &mut self,
         relay_addr: SocketAddr,
         interval: std::time::Duration,
     ) -> Result<NodeDetails, StruumError> {
+        // If an IP already exists in the coordinator, do not request the relay
+        if let Some(existing_peer) = self.coordinator.select_node() {
+            log::info!(
+                "Node {} already has known peer {} in coordinator (IP: {}). Skipping relay request.",
+                self.id,
+                existing_peer.id,
+                existing_peer.ip
+            );
+            return Ok(existing_peer);
+        }
+
         self.relay_addr = Some(relay_addr);
         log::info!("Node {} long-polling connection request to relay at {}...", self.id, relay_addr);
 
         loop {
+            if let Some(existing_peer) = self.coordinator.select_node() {
+                return Ok(existing_peer);
+            }
+
             let _ = self.introduce(relay_addr).await;
 
             tokio::select! {
@@ -379,12 +395,23 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
     /// Long-polls connection requests to the relay server until at least `min_peers` peer nodes
     /// are discovered with a configurable poll interval.
+    /// If node already has at least `min_peers` in coordinator, relay polling is skipped.
     pub async fn long_poll_relay_for_peers_with_interval(
         &mut self,
         relay_addr: SocketAddr,
         min_peers: usize,
         interval: std::time::Duration,
     ) -> Result<Vec<NodeDetails>, StruumError> {
+        if self.coordinator.node_count() >= min_peers {
+            log::info!(
+                "Node {} already has {} peer(s) in coordinator (target: {}). Skipping relay request.",
+                self.id,
+                self.coordinator.node_count(),
+                min_peers
+            );
+            return Ok(self.coordinator.get_nodes());
+        }
+
         self.relay_addr = Some(relay_addr);
         log::info!(
             "Node {} long-polling relay at {} for {} peer(s)...",
@@ -419,9 +446,18 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     }
 
     /// Listens for an introduction packet sent by the coordinator or relay introducing a sibling node.
-    /// If a relay address was configured, it delegates to `long_poll_relay` to ensure resilience
-    /// against delayed relay startup and dropped UDP packets.
+    /// If any peer already exists in the coordinator, returns it immediately without contacting the relay.
     pub async fn listen_sibling_introduction(&mut self) -> Result<NodeDetails, StruumError> {
+        if let Some(existing_peer) = self.coordinator.select_node() {
+            log::info!(
+                "Node {} already has known peer {} in coordinator (IP: {}). Skipping relay introduction.",
+                self.id,
+                existing_peer.id,
+                existing_peer.ip
+            );
+            return Ok(existing_peer);
+        }
+
         match self.relay_addr {
             Some(relay_addr) => self.long_poll_relay(relay_addr).await,
             None => {
@@ -442,7 +478,11 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     }
 
     /// Registers with a relay server and polls until a peer node is introduced.
+    /// If any peer already exists in the coordinator, returns it immediately.
     pub async fn register_and_wait_for_peer(&mut self, relay_addr: SocketAddr) -> Result<NodeDetails, StruumError> {
+        if let Some(existing_peer) = self.coordinator.select_node() {
+            return Ok(existing_peer);
+        }
         self.long_poll_relay(relay_addr).await
     }
 
@@ -506,7 +546,16 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     }
 
     /// Registers this node with a remote relay server by sending an Introduction packet.
+    /// If peer IPs already exist in the coordinator, relay registration is skipped.
     pub async fn register_to_relay(&mut self, relay_addr: SocketAddr) -> Result<(), StruumError> {
+        if self.coordinator.node_count() > 0 {
+            log::info!(
+                "Node {} already has {} peer(s) in coordinator. Skipping relay registration.",
+                self.id,
+                self.coordinator.node_count()
+            );
+            return Ok(());
+        }
         self.relay_addr = Some(relay_addr);
         log::info!("Node {} sending registration packet to relay at {}...", self.id, relay_addr);
         self.introduce(relay_addr).await
@@ -925,5 +974,45 @@ mod tests {
 
         relay_handle.abort();
     }
+
+    #[tokio::test]
+    async fn test_skip_relay_if_peer_exists_in_coordinator() {
+        let mut node = Node::<1024>::with_id(UID::new(10), 38811, 38812, NodeBackend::Cpu, 1)
+            .await
+            .expect("Failed to initialize Node");
+
+        let existing_peer = NodeDetails {
+            id: UID::new(20),
+            ip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38821),
+            role: NodeRole::NODE,
+            backend: Some(NodeBackend::Cpu),
+            tcp_port: Some(38822),
+        };
+
+        // Manually insert known peer into node's coordinator
+        node.register_node(existing_peer.clone());
+        assert_eq!(node.node_count(), 1);
+
+        // Dummy offline relay address
+        let bogus_relay_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 39999);
+
+        // 1. long_poll_relay should immediately return existing peer without calling relay
+        let peer = node.long_poll_relay(bogus_relay_addr).await.expect("Expected immediate peer");
+        assert_eq!(peer.id, UID::new(20));
+        assert_eq!(peer.tcp_port, Some(38822));
+
+        // 2. register_to_relay should immediately succeed without sending to relay
+        node.register_to_relay(bogus_relay_addr).await.expect("Expected immediate success");
+
+        // 3. listen_sibling_introduction should immediately return existing peer
+        let peer2 = node.listen_sibling_introduction().await.expect("Expected immediate peer");
+        assert_eq!(peer2.id, UID::new(20));
+
+        // 4. long_poll_relay_for_peers(1) should immediately return existing peer list
+        let peers = node.long_poll_relay_for_peers(bogus_relay_addr, 1).await.expect("Expected immediate peers");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].id, UID::new(20));
+    }
 }
+
 

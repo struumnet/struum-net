@@ -135,7 +135,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_relay_server_creation_and_registration() {
-        let mut relay = RelayServer::<1024>::new(38701, 38702)
+        let mut relay = RelayServer::<1024>::new(39751, 39752)
             .await
             .expect("Failed to create RelayServer");
 
