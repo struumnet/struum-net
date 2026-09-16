@@ -9,10 +9,12 @@ pub(crate) struct GlContext {
 
 impl GlContext {
     pub(crate) fn new() -> Result<Self, StruumError> {
-        let mut glfw = glfw::init(glfw::fail_on_errors)
+        let mut glfw = glfw::init(glfw::log_errors)
             .map_err(|e| StruumError::GlContextCreationError(e.to_string()))?;
 
         glfw.window_hint(glfw::WindowHint::ContextVersion(4, 3));
+        glfw.window_hint(glfw::WindowHint::OpenGlProfile(glfw::OpenGlProfileHint::Core));
+        glfw.window_hint(glfw::WindowHint::OpenGlForwardCompat(true));
         glfw.window_hint(glfw::WindowHint::Visible(false));
 
         let (mut window, _) = glfw

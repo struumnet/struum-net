@@ -133,6 +133,15 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         let scheduler = JobScheduler::new(tx, workers);
         let net = NetworkLayer::new(udp_port, tcp_port).await?;
 
+        log::info!(
+            "Initialized Node {} [IP: {}] [UDP: {}] [TCP: {}] [Backend: {:?}]",
+            id,
+            net.ip,
+            udp_port,
+            tcp_port,
+            backend
+        );
+
         Ok(Self {
             id,
             net,
@@ -148,7 +157,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     /// Submits a kernel to be scheduled and executed by worker threads on this node.
     pub async fn submit_job(&self, kernel: Kernel) -> JobId {
         let id = self.scheduler.add_job(kernel).await;
-        log::info!("Node {} submitted job {} to local scheduler", self.id, id);
+        log::debug!("Node {} submitted job {} to local scheduler", self.id, id);
         id
     }
 
@@ -156,7 +165,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     pub async fn recv_completed_job(&mut self) -> Option<JobId> {
         let id = self.job_rx.recv().await;
         if let Some(ref job_id) = id {
-            log::info!("Node {} received completion notice for job {}", self.id, job_id);
+            log::debug!("Node {} received completion notice for job {}", self.id, job_id);
         }
         id
     }
@@ -175,13 +184,19 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
     /// Connects directly to a peer node at the specified SocketAddr over TCP.
     pub async fn connect_to_peer_addr(&mut self, peer_addr: SocketAddr) -> Result<(), StruumError> {
-        self.net.initialize_tcp_connection_addr(peer_addr).await
+        log::info!("Node {} connecting to peer at {} over TCP...", self.id, peer_addr);
+        self.net.initialize_tcp_connection_addr(peer_addr).await?;
+        log::info!("Node {} established TCP connection with peer at {}", self.id, peer_addr);
+        Ok(())
     }
 
     /// Accepts an incoming TCP connection from a peer node.
     /// Returns the SocketAddr of the connected peer.
     pub async fn accept_peer_connection(&mut self) -> Result<SocketAddr, StruumError> {
-        self.net.accept_tcp_connection().await
+        log::info!("Node {} waiting for incoming TCP peer connection...", self.id);
+        let peer_addr = self.net.accept_tcp_connection().await?;
+        log::info!("Node {} accepted TCP connection from peer at {}", self.id, peer_addr);
+        Ok(peer_addr)
     }
 
     /// Sends a computational task (serialized Kernel with source and buffer bindings) to a peer over TCP.
@@ -191,6 +206,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         task_id: &str,
         kernel: &Kernel,
     ) -> Result<(), StruumError> {
+        log::debug!("Node {} sending task '{}' to {}", self.id, task_id, peer_addr);
         let kernel_data = bincode::serialize(kernel)
             .map_err(|e| StruumError::SerializationError(format!("Failed to serialize Kernel: {}", e)))?;
         let packet = TaskDataPacket::new(task_id.to_string(), self.id, kernel_data);
@@ -216,6 +232,12 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         let packet = self.net.recv_tcp_data(peer_addr).await?;
         match packet {
             TcpPacket::TASKDATA(data_packet) => {
+                log::debug!(
+                    "Node {} received task '{}' from sender {}",
+                    self.id,
+                    data_packet.task_id,
+                    data_packet.sender_id
+                );
                 let kernel: Kernel = bincode::deserialize(&data_packet.kernel_data)
                     .map_err(|e| StruumError::SerializationError(format!("Failed to deserialize Kernel: {}", e)))?;
                 Ok((data_packet.task_id, data_packet.sender_id, kernel))
@@ -243,6 +265,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         job_id: &str,
         result_kernel: &Kernel,
     ) -> Result<(), StruumError> {
+        log::debug!("Node {} sending task result for '{}' to {}", self.id, job_id, peer_addr);
         let result_data = bincode::serialize(result_kernel)
             .map_err(|e| StruumError::SerializationError(format!("Failed to serialize result Kernel: {}", e)))?;
         let packet = ResultPacket::new(job_id.to_string(), self.id, result_data);
@@ -258,6 +281,12 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         let packet = self.net.recv_tcp_data(peer_addr).await?;
         match packet {
             TcpPacket::RESULT(res) => {
+                log::debug!(
+                    "Node {} received task result for '{}' from sender {}",
+                    self.id,
+                    res.job_id,
+                    res.sender_id
+                );
                 let kernel: Kernel = bincode::deserialize(&res.result_data)
                     .map_err(|e| StruumError::SerializationError(format!("Failed to deserialize result Kernel: {}", e)))?;
                 Ok((res.job_id, res.sender_id, kernel))
@@ -297,9 +326,17 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
     /// Listens for an introduction packet sent by the coordinator or relay introducing a sibling node.
     pub async fn listen_sibling_introduction(&mut self) -> Result<NodeDetails, StruumError> {
+        log::debug!("Node {} waiting for peer introduction packet...", self.id);
         let intro = self.listen_introduction().await?;
         let details = NodeDetails::from(intro);
         self.coordinator.register_node(details.clone());
+        log::info!(
+            "Node {} received and registered peer {} at {} (TCP: {:?})",
+            self.id,
+            details.id,
+            details.ip,
+            details.tcp_port
+        );
         Ok(details)
     }
 
@@ -364,6 +401,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
     /// Registers this node with a remote relay server by sending an Introduction packet.
     pub async fn register_to_relay(&mut self, relay_addr: SocketAddr) -> Result<(), StruumError> {
+        log::info!("Node {} sending registration packet to relay at {}...", self.id, relay_addr);
         self.introduce(relay_addr).await
     }
 

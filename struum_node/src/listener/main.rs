@@ -41,18 +41,18 @@ async fn main() -> Result<(), StruumError> {
         2,
     ).await?;
 
-    println!("Node (listener) started!");
-    println!(
+    log::info!("Node (listener) started!");
+    log::info!(
         "We are: [UID] {} [IP] {} [UDP-PORT] {} [TCP-PORT] {}",
         node.id, node.net.ip, node.net.udp_port, node.net.tcp_port
     );
-    println!("Registering to relay at {}...", relay_addr);
+    log::info!("Sending registration request to relay at {}...", relay_addr);
 
     node.register_to_relay(relay_addr).await?;
-    println!("Registered! Waiting for relayed peer introductions from relay...");
+    log::info!("Waiting for relayed peer introductions from relay...");
 
     let peer = node.listen_sibling_introduction().await?;
-    println!(
+    log::info!(
         "Successfully connected! Received peer introduction: UID {} at {}",
         peer.id, peer.ip
     );

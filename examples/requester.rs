@@ -67,24 +67,10 @@ async fn main() -> Result<(), StruumError> {
 
     let mut node = node::Node::<2048>::with_id(node_id, udp_port, tcp_port, NodeBackend::Cpu, 1).await?;
 
-    println!("Requester node started!");
-    println!(
-        "We are: [UID] {} [IP] {} [UDP-PORT] {} [TCP-PORT] {}",
-        node.id, node.net.ip, node.net.udp_port, node.net.tcp_port
-    );
-    println!("Registering to relay at {}...", relay_addr);
-
     node.register_to_relay(relay_addr).await?;
-    println!("Registered! Waiting for peer introduction from relay...");
-
     let peer = node.listen_sibling_introduction().await?;
-    println!("Received peer introduction: UID {} at {}", peer.id, peer.ip);
-
     let peer_tcp = peer.tcp_addr().expect("Peer did not provide TCP address");
-    println!("Connecting to worker over TCP at {}...", peer_tcp);
-
     node.connect_to_peer_addr(peer_tcp).await?;
-    println!("Connected to worker over TCP!");
 
     let x: Vec<f32> = (0..5).map(|i| i as f32).collect();
     let y: Vec<f32> = x.iter().map(|&xi| 2.0 * xi + 1.0).collect();
