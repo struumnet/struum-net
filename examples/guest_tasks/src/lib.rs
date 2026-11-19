@@ -9,6 +9,7 @@ use bytemuck::{Pod, Zeroable};
 use struum_guest::TaskContext;
 
 pub mod mlp;
+pub mod render;
 
 /// Must match the host's `#[gpu_type] struct Param` (repr(C), two f32).
 #[repr(C)]
@@ -109,4 +110,16 @@ fn mlp_predict(ctx: &TaskContext) {
     }
 }
 
-struum_guest::tasks!(gradient, count_primes, mlp_grad, mlp_predict);
+/// Path tracer. Buffers: 0 = config `[width, height, samples_per_pixel, max_depth, seed]`
+/// (broadcast), 1 = pixels (u32 RGBA, split, work buffer; index = y * width + x).
+fn render(ctx: &TaskContext) {
+    let config = ctx.input::<u32>(0);
+    let (width, height, spp, depth, seed) = (config[0], config[1], config[2], config[3], config[4]);
+    let pixels = ctx.output::<u32>(1);
+    let scene = render::Scene::new(seed, width as f32 / height as f32);
+    for (i, px) in pixels.iter_mut().enumerate() {
+        *px = scene.pixel((ctx.offset() + i) as u32, width, height, spp, depth, seed);
+    }
+}
+
+struum_guest::tasks!(gradient, count_primes, mlp_grad, mlp_predict, render);

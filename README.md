@@ -181,6 +181,33 @@ gradients out, and the phone link measured 0.6 MB/s, while the phone's own compu
 compute-heavy models). Keep the phone awake (`adb shell svc power stayon usb`): when Android dozes,
 it throttles Wi-Fi, the shard times out, and it is reassigned to another worker.
 
+## Example: distributed path-traced render
+
+`examples/render.rs` renders a 3D scene with a path tracer (`render` in `examples/guest_tasks`).
+
+- Each pixel costs thousands of ray/sphere tests, but a shard only carries a few config words in
+  and 4 bytes per pixel out. Computation dominates, so this is where adding devices (a phone
+  included) should speed things up. Compare it with the communication-bound training PoC above.
+- Pixels are split into bands that workers pull from a queue, so faster devices take more bands.
+- Each pixel seeds its own random numbers, so the image is the same however it's split.
+
+It writes two images:
+- `data/render.png`, the rendered image;
+- `data/render_workers.png`, each band tinted by the worker that rendered it, with a printed
+  legend giving each worker's share.
+
+```bash
+scripts/build-guest-tasks.sh
+cargo run --release -p struum_relay
+# start workers (PC and/or phone), then:
+RELAY_ADDR=<pc-lan-ip>:39001 cargo run --release --example render
+MODE=local cargo run --release --example render        # this machine alone, to compare
+```
+
+Env: `WIDTH` (800), `HEIGHT` (450), `SPP` samples per pixel (32), `DEPTH` bounces (8), `SEED` (42),
+`OUT` (data/render.png), `SHARDS_PER_PEER` (8). `ShardReport` now also lists each shard's
+range (`ranges`) and the worker that completed it (`completed_on`).
+
 ## Examples
 
 ```bash

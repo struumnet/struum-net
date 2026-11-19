@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -53,6 +54,10 @@ pub struct ShardReport {
     pub retired: Vec<SocketAddr>,
     /// Number of shard reassignments.
     pub retries: usize,
+    /// Work range of each shard, in order.
+    pub ranges: Vec<Range<usize>>,
+    /// Peer that completed each shard (same order as `ranges`).
+    pub completed_on: Vec<SocketAddr>,
     pub elapsed: Duration,
 }
 
@@ -144,15 +149,17 @@ pub(crate) async fn run_sharded(
         });
     }
 
-    let mut report = ShardReport { shards, ..Default::default() };
+    let mut report = ShardReport { shards, ranges, ..Default::default() };
+    let mut completed_on: Vec<Option<SocketAddr>> = vec![None; shards];
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok(Ok((exit, done))) => {
                 if let PeerExit::Retired(addr) = exit {
                     report.retired.push(addr);
                 }
-                for addr in done {
+                for (idx, addr) in done {
                     *report.completed_by.entry(addr).or_default() += 1;
+                    completed_on[idx] = Some(addr);
                 }
             }
             Ok(Err(e)) => {
@@ -180,6 +187,7 @@ pub(crate) async fn run_sharded(
         .collect();
     let merged = Work::merge(parts)?;
 
+    report.completed_on = completed_on.into_iter().map(|a| a.expect("all shards completed")).collect();
     report.retries = shared.retries.load(Ordering::SeqCst);
     report.elapsed = started.elapsed();
     log::info!(
@@ -210,7 +218,7 @@ async fn peer_loop(
     payloads: &[Arc<ShardPayload>],
     expected: &[usize],
     opts: &ShardOptions,
-) -> Result<(PeerExit, Vec<SocketAddr>), StruumError> {
+) -> Result<(PeerExit, Vec<(usize, SocketAddr)>), StruumError> {
     let mut done = Vec::new();
     loop {
         // Register for wakeups before checking state so no notification is missed.
@@ -244,7 +252,7 @@ async fn peer_loop(
                     shared.results.lock().await[idx] = Some(work);
                     shared.remaining.fetch_sub(1, Ordering::SeqCst);
                     shared.changed.notify_waiters();
-                    done.push(peer.addr);
+                    done.push((idx, peer.addr));
                     continue;
                 }
                 Ok(work) => format!(
