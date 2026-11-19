@@ -22,8 +22,8 @@ impl Shader {
 
             gl::DispatchCompute(x, y, z);
 
-            // Wait for shader writes to finish
-            gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT);
+            // Make shader writes visible to later buffer reads/maps
+            gl::MemoryBarrier(gl::SHADER_STORAGE_BARRIER_BIT | gl::BUFFER_UPDATE_BARRIER_BIT);
         }
     }
 
@@ -53,7 +53,7 @@ impl Shader {
                     shader,
                     len,
                     std::ptr::null_mut(),
-                    buffer.as_mut_ptr() as *mut i8,
+                    buffer.as_mut_ptr() as *mut gl::types::GLchar,
                 );
 
                 let log = String::from_utf8_lossy(&buffer);
@@ -95,7 +95,7 @@ impl Shader {
                     program,
                     len,
                     std::ptr::null_mut(),
-                    buffer.as_mut_ptr() as *mut i8,
+                    buffer.as_mut_ptr() as *mut gl::types::GLchar,
                 );
 
                 let log = String::from_utf8_lossy(&buffer);

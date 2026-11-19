@@ -3,9 +3,23 @@ name = "struum_opengl"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Use a headless EGL + OpenGL ES 3.1 context instead of glfw + desktop GL 4.3.
+# Always on for Android; enable on desktop Linux to test the GLES path on Mesa.
+egl = ["dep:khronos-egl"]
+
 [dependencies]
 struum_types = { workspace = true }
 struum_kernel = { workspace = true }
 bytemuck = { workspace = true }
 gl = { workspace = true }
+log = { workspace = true }
+khronos-egl = { version = "6.0.0", features = ["static"], optional = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
 glfw = { workspace = true }
+
+# The NDK ships libEGL but no pkg-config file: skip the probe and link it
+# directly (see `link(name = "EGL")` in src/gl_context/egl.rs).
+[target.'cfg(target_os = "android")'.dependencies]
+khronos-egl = { version = "6.0.0", features = ["static", "no-pkg-config"] }

@@ -35,23 +35,40 @@ impl GlBuffer {
         }
     }
 
-    pub(crate) fn read(&self) -> Vec<u8> {
+    pub(crate) fn read(&self) -> Result<Vec<u8>, StruumError> {
         let mut data = vec![0u8; self.size];
 
+        if self.size == 0 {
+            return Ok(data);
+        }
+
+        // glMapBufferRange works on both desktop GL 4.3 and OpenGL ES 3.1,
+        // unlike glGetBufferSubData which does not exist in GLES.
         unsafe {
             gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, self.id);
 
-            gl::GetBufferSubData(
+            let ptr = gl::MapBufferRange(
                 gl::SHADER_STORAGE_BUFFER,
                 0,
                 self.size as isize,
-                data.as_mut_ptr() as *mut c_void,
-            );
+                gl::MAP_READ_BIT,
+            ) as *const u8;
 
+            if ptr.is_null() {
+                gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
+                return Err(StruumError::BufferReadError(format!(
+                    "glMapBufferRange failed for buffer '{}' (GL error 0x{:x})",
+                    self.name,
+                    gl::GetError()
+                )));
+            }
+
+            std::ptr::copy_nonoverlapping(ptr, data.as_mut_ptr(), self.size);
+            gl::UnmapBuffer(gl::SHADER_STORAGE_BUFFER);
             gl::BindBuffer(gl::SHADER_STORAGE_BUFFER, 0);
         }
 
-        data
+        Ok(data)
     }
 
     pub(crate) fn write(&mut self, data: &[u8]) -> Result<(), StruumError> {
