@@ -579,8 +579,15 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             min_peers
         );
 
+        // Re-register with the relay only once per `interval`: each registration makes the relay
+        // send introductions for every known node, so re-registering on every received packet
+        // would turn into a tight request/introduction loop.
+        let mut next_poll = tokio::time::Instant::now();
         while self.coordinator.node_count() < min_peers {
-            let _ = self.introduce(relay_addr).await;
+            if tokio::time::Instant::now() >= next_poll {
+                let _ = self.introduce(relay_addr).await;
+                next_poll = tokio::time::Instant::now() + interval;
+            }
 
             tokio::select! {
                 res = self.listen_introduction() => {
@@ -589,7 +596,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                         self.coordinator.register_node(details);
                     }
                 }
-                _ = tokio::time::sleep(interval) => {
+                _ = tokio::time::sleep_until(next_poll) => {
                     log::debug!(
                         "Node {} polling relay at {} ({}/{} peers discovered)...",
                         self.id,
