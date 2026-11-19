@@ -1,7 +1,9 @@
 mod job;
-mod state;
-mod worker;
 mod scheduler;
+mod state;
+mod work;
+mod worker;
 
 pub use job::JobId;
 pub use scheduler::JobScheduler;
+pub use work::Work;

@@ -5,10 +5,13 @@ pub enum StruumError {
     GlContextCreationError(String),
     ShaderCreationError(String),
     BufferWriteError(String),
+    BufferReadError(String),
     NotFound(String),
     NetworkConnectionError(String),
     SerializationError(String),
     ParserError(String),
+    ShardError(String),
+    TaskError(String),
 }
 
 impl fmt::Display for StruumError {
@@ -17,10 +20,13 @@ impl fmt::Display for StruumError {
             Self::GlContextCreationError(msg) => write!(f, "GL Context Creation Error: {}", msg),
             Self::ShaderCreationError(msg) => write!(f, "Shader Creation Error: {}", msg),
             Self::BufferWriteError(msg) => write!(f, "Buffer Write Error: {}", msg),
+            Self::BufferReadError(msg) => write!(f, "Buffer Read Error: {}", msg),
             Self::NotFound(msg) => write!(f, "Not Found Error: {}", msg),
             Self::NetworkConnectionError(msg) => write!(f, "Network Connection Error: {}", msg),
             Self::SerializationError(msg) => write!(f, "Serialization Error: {}", msg),
             Self::ParserError(msg) => write!(f, "Parser Error: {}", msg),
+            Self::ShardError(msg) => write!(f, "Shard Error: {}", msg),
+            Self::TaskError(msg) => write!(f, "Task Error: {}", msg),
         }
     }
 }

@@ -9,7 +9,11 @@ members = [
     "struum_macros",
     "struum_scheduler",
     "struum_relay",
+    "struum_worker",
+    "struum_cpu",
+    "struum_guest",
 ]
+exclude = ["examples/guest_tasks"]
 resolver="3"
 
 [package]
@@ -27,6 +31,8 @@ struum_kernel = {path = "./struum_kernel"}
 struum_macros = {path = "./struum_macros"}
 struum_scheduler = {path = "./struum_scheduler"}
 struum_relay = {path = "./struum_relay"}
+struum_worker = {path = "./struum_worker"}
+struum_cpu = {path = "./struum_cpu"}
 
 tokio = { version = "1.53.1", features = ["full"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -54,6 +60,7 @@ struum_macros = { workspace = true }
 struum_scheduler = { workspace = true }
 struum_coordinator = { workspace = true }
 struum_relay = { workspace = true }
+struum_cpu = { workspace = true }
 
 log = { workspace = true }
 env_logger = { workspace = true }
@@ -62,7 +69,6 @@ bytemuck = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 gl = { workspace = true }
-glfw = { workspace = true }
 bincode = { workspace = true }
 proc-macro2 = { workspace = true }
 quote = { workspace = true }

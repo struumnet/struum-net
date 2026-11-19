@@ -21,6 +21,118 @@ cargo run --example worker
 cargo run --example requester
 ```
 
+## Standalone worker
+
+`struum_worker` is the worker as its own binary (desktop or Android):
+
+```bash
+RELAY_ADDR=127.0.0.1:39001 cargo run -p struum_worker
+```
+
+Env vars: `RELAY_ADDR`, `NODE_ID` (default: random), `NODE_UDP_PORT` (34255), `NODE_TCP_PORT` (34265), `RUST_LOG`.
+On startup it runs a small GPU self-test and exits with a clear error if compute shaders are unavailable.
+
+## Android worker
+
+Android phones can run workers through a headless EGL context with **OpenGL ES 3.1** compute shaders
+(most devices from ~2015 onwards). Requesters still pack kernels as desktop GLSL; the worker converts
+them to GLSL ES. Kernels using `double` are rejected on GLES.
+
+### Build
+
+Needs `rustup`, [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) and the Android NDK:
+
+```bash
+export ANDROID_NDK_HOME=/path/to/android-ndk
+scripts/build-android.sh            # arm64-v8a, API 26
+```
+
+On NixOS the NDK comes from `androidenv` (unfree, needs the Android SDK license accepted):
+`androidenv.androidPkgs.ndk-bundle` with `config = { allowUnfree = true; android_sdk.accept_license = true; }`.
+
+### Run
+
+Phone and PC must be on the **same Wi-Fi/LAN** (the requester connects to the phone's TCP port).
+
+```bash
+# PC: relay
+cargo run -p struum_relay
+
+# Phone (via adb; Termux works too)
+adb push target/aarch64-linux-android/release/struum_worker /data/local/tmp/
+adb shell chmod +x /data/local/tmp/struum_worker
+adb shell 'RELAY_ADDR=<pc-lan-ip>:39001 /data/local/tmp/struum_worker'
+
+# PC: requester
+RELAY_ADDR=<pc-lan-ip>:39001 cargo run --example requester
+```
+
+The node detects its LAN IP by routing towards `8.8.8.8`, so the phone needs a network with an internet route.
+
+### Test the GLES path on desktop
+
+The same EGL/GLES backend can be enabled on Linux (Mesa) without a phone:
+
+```bash
+cargo run -p struum_worker --features egl
+```
+
+## CPU tasks & sharding
+
+Besides GPU kernels (GLSL), nodes run **CPU tasks**: WebAssembly modules shipped with their data,
+so workers never need rebuilding. Any job, CPU or GPU, can be **sharded** across all connected
+workers and merged back in order.
+
+```rust
+let peers = node.discover_peers(relay_addr, 2, Duration::from_secs(2)).await?;
+node.connect_to_peers(&peers).await;
+
+let mut task = CpuTask::new(std::fs::read("tasks.wasm")?, "count_primes");
+task.add_buffer(Buffer::new("limits", &limits));          // buffer 0
+task.add_buffer(Buffer::empty::<u32>("counts", n));       // buffer 1
+task.set_work_buffer("limits");
+
+let result = node.run_sharded(task, &ShardOptions::default()).await?;
+let counts = result.into_cpu_task().unwrap().get_buffer("counts").unwrap().as_slice::<u32>();
+```
+
+A `Kernel` goes through `run_sharded` the same way. GPU work only goes to peers advertising
+`OpenGL`; CPU work goes to every peer.
+
+**Writing tasks:** use `struum_guest` in a `cdylib` crate built for `wasm32-unknown-unknown`
+(see `examples/guest_tasks`):
+
+```rust
+fn count_primes(ctx: &struum_guest::TaskContext) {
+    let limits = ctx.input::<u32>(0);
+    let counts = ctx.output::<u32>(1);
+    for i in 0..ctx.len() { counts[i] = primes_below(limits[i]); }
+}
+struum_guest::tasks!(count_primes);
+```
+
+**How sharding works**
+- The work range `0..n` (the work buffer's length) is split into `peers × shards_per_peer` shards.
+  Peers pull shards from a shared queue, so faster devices take more.
+- Buffers with one element per work item are **split**; anything else (parameters, tables) is
+  **broadcast** to every shard. Override with `set_shard_mode(name, ShardMode::…)`.
+  Index `i` in a shard is global index `ctx.offset() + i` (`STRUUM_OFFSET + i` in GLSL).
+- Outputs must be split (map-style); do reductions after the merge.
+- A peer that times out (`shard_timeout`) or disconnects has its shard reassigned
+  (up to `max_attempts`) and is dropped. A task error (wasm trap, shader compile error) fails the job.
+- On each worker a CPU task is further split across all cores.
+
+```bash
+scripts/build-guest-tasks.sh                 # builds examples/guest_tasks to .wasm
+cargo run --release -p struum_relay
+NODE_ID=51 NODE_UDP_PORT=35001 NODE_TCP_PORT=35011 cargo run --release -p struum_worker
+NODE_ID=52 NODE_UDP_PORT=35002 NODE_TCP_PORT=35012 cargo run --release -p struum_worker
+cargo run --release --example sharded_cpu    # or sharded_gpu
+```
+
+Workers run a CPU and a GPU self-test on startup and advertise `Cpu` if the GPU is unavailable
+(override with `WORKER_BACKEND=cpu|opengl`).
+
 ## Examples
 
 ```bash

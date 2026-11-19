@@ -5,12 +5,16 @@ use tokio::sync::mpsc::{self, Receiver};
 
 use struum_kernel::Kernel;
 use struum_network::layer::NetworkLayer;
-use struum_scheduler::{JobId, JobScheduler};
+use struum_network::layer::PeerConnection;
+use struum_scheduler::{JobId, JobScheduler, Work};
 use struum_types::StruumError;
 use struum_types::network::{
     HelloPacket, IntroductionPacket, NetworkCommunicator, NetworkCoordinator, NodeBackend,
     NodeDetails, NodeRole, ResultPacket, TaskDataPacket, TaskPacket, TcpPacket, UID, UdpPacket,
+    WorkErrorPacket, WorkPacket,
 };
+
+use crate::dispatch::{self, ShardOptions, ShardReport};
 
 /// Coordinator component embedded in a `Node`.
 /// Maintains the peer network map independently and provides node selection/lookup logic.
@@ -177,6 +181,161 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     /// Retrieves the resulting Kernel of a completed job from the local scheduler.
     pub async fn get_job_result(&self, id: &JobId) -> Option<Kernel> {
         self.scheduler.get_result_of_job(id).await
+    }
+
+    /// Submits any kind of work (GPU kernel or CPU task) to the local scheduler.
+    pub async fn submit_work(&self, work: impl Into<Work>) -> JobId {
+        self.scheduler.add_work(work.into()).await
+    }
+
+    /// Result of a completed job: `Some(Ok(work))`, `Some(Err(message))`, or `None` if unknown.
+    pub async fn get_work_result(&self, id: &JobId) -> Option<Result<Work, String>> {
+        self.scheduler.get_work_result(id).await
+    }
+
+    /// Runs `work` on this node and waits for it to finish.
+    pub async fn execute_local(&mut self, work: impl Into<Work>) -> Result<Work, StruumError> {
+        let id = self.submit_work(work).await;
+        loop {
+            let done = self
+                .recv_completed_job()
+                .await
+                .ok_or_else(|| StruumError::TaskError("local scheduler stopped".to_string()))?;
+            if done == id {
+                break;
+            }
+        }
+        self.get_work_result(&id)
+            .await
+            .unwrap_or_else(|| Err("result missing".to_string()))
+            .map_err(StruumError::TaskError)
+    }
+
+    // --- Sharded execution across peers (see `dispatch`) ---
+
+    /// Opens TCP connections to every given peer that advertises a TCP port.
+    /// Returns the TCP addresses that are connected (already-open ones included).
+    pub async fn connect_to_peers(&mut self, peers: &[NodeDetails]) -> Vec<SocketAddr> {
+        let mut connected = Vec::new();
+        for peer in peers {
+            let Some(addr) = peer.tcp_addr() else {
+                log::warn!("Peer {} has no TCP port; skipping", peer.id);
+                continue;
+            };
+            if self.net.peer(&addr).is_some() {
+                connected.push(addr);
+                continue;
+            }
+            match self.connect_to_peer_addr(addr).await {
+                Ok(()) => connected.push(addr),
+                Err(e) => log::warn!("Could not connect to peer {} at {}: {}", peer.id, addr, e),
+            }
+        }
+        connected
+    }
+
+    /// Connected peers that can run `kind` work.
+    fn eligible_peers(&self, kind: struum_types::network::WorkKind) -> Vec<PeerConnection> {
+        self.coordinator
+            .get_nodes()
+            .into_iter()
+            .filter(|p| dispatch::peer_accepts(p, kind))
+            .filter_map(|p| p.tcp_addr())
+            .filter_map(|addr| self.net.peer(&addr))
+            .collect()
+    }
+
+    /// Splits `work` into shards, runs them on all connected eligible peers
+    /// (GPU work on OpenGL peers, CPU work on any peer), reassigns shards from
+    /// failed peers and merges the results in order.
+    pub async fn run_sharded(
+        &mut self,
+        work: impl Into<Work>,
+        opts: &ShardOptions,
+    ) -> Result<Work, StruumError> {
+        self.run_sharded_with_report(work, opts).await.map(|(w, _)| w)
+    }
+
+    /// Like [`Node::run_sharded`], also returning per-peer statistics.
+    pub async fn run_sharded_with_report(
+        &mut self,
+        work: impl Into<Work>,
+        opts: &ShardOptions,
+    ) -> Result<(Work, ShardReport), StruumError> {
+        let work = work.into();
+        let peers = self.eligible_peers(work.kind());
+        let result = dispatch::run_sharded(self.id, work, peers, opts).await;
+
+        if let Ok((_, report)) = &result {
+            // Forget peers that failed so later jobs skip them.
+            for addr in &report.retired {
+                self.net.disconnect(addr);
+                let ids: Vec<UID> = self
+                    .coordinator
+                    .get_nodes()
+                    .into_iter()
+                    .filter(|p| p.tcp_addr() == Some(*addr))
+                    .map(|p| p.id)
+                    .collect();
+                for id in ids {
+                    self.coordinator.deregister_node(&id);
+                }
+            }
+        }
+        result
+    }
+
+    /// Serves one connected requester: executes every `WORK` (and legacy
+    /// `TASKDATA`) packet it sends and replies with `RESULT` or `WORKERROR`.
+    /// Returns when the requester disconnects.
+    pub async fn serve_peer(&mut self, peer_addr: SocketAddr) -> Result<(), StruumError> {
+        loop {
+            let packet = match self.recv_tcp_packet(&peer_addr).await {
+                Ok(p) => p,
+                Err(e) => {
+                    log::info!("Node {} stopped serving {}: {}", self.id, peer_addr, e);
+                    self.net.disconnect(&peer_addr);
+                    return Ok(());
+                }
+            };
+
+            let (task_id, kind, work) = match packet {
+                TcpPacket::WORK(WorkPacket { task_id, kind, data, .. }) => {
+                    (task_id, kind, Work::from_bytes(kind, &data))
+                }
+                TcpPacket::TASKDATA(TaskDataPacket { task_id, kernel_data, .. }) => {
+                    let kind = struum_types::network::WorkKind::Gpu;
+                    (task_id, kind, Work::from_bytes(kind, &kernel_data))
+                }
+                other => {
+                    log::warn!("Node {} ignoring unexpected packet from {}: {:?}", self.id, peer_addr, other);
+                    continue;
+                }
+            };
+
+            log::info!("Node {} running {:?} task '{}' from {}", self.id, kind, task_id, peer_addr);
+            let started = std::time::Instant::now();
+            let result = match work {
+                Ok(work) => self.execute_local(work).await,
+                Err(e) => Err(e),
+            };
+
+            let reply = match result.and_then(|w| w.to_bytes()) {
+                Ok(bytes) => {
+                    log::info!("Node {} finished '{}' in {:?}", self.id, task_id, started.elapsed());
+                    TcpPacket::RESULT(ResultPacket::new(task_id, self.id, bytes))
+                }
+                Err(e) => {
+                    log::error!("Node {} failed '{}': {}", self.id, task_id, e);
+                    TcpPacket::WORKERROR(WorkErrorPacket {
+                        task_id,
+                        sender_id: self.id,
+                        message: e.to_string(),
+                    })
+                }
+            };
+            self.send_tcp_packet(peer_addr, reply).await?;
+        }
     }
 
     // --- Inter-node peer communication methods ---
@@ -420,8 +579,15 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             min_peers
         );
 
+        // Re-register with the relay only once per `interval`: each registration makes the relay
+        // send introductions for every known node, so re-registering on every received packet
+        // would turn into a tight request/introduction loop.
+        let mut next_poll = tokio::time::Instant::now();
         while self.coordinator.node_count() < min_peers {
-            let _ = self.introduce(relay_addr).await;
+            if tokio::time::Instant::now() >= next_poll {
+                let _ = self.introduce(relay_addr).await;
+                next_poll = tokio::time::Instant::now() + interval;
+            }
 
             tokio::select! {
                 res = self.listen_introduction() => {
@@ -430,7 +596,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                         self.coordinator.register_node(details);
                     }
                 }
-                _ = tokio::time::sleep(interval) => {
+                _ = tokio::time::sleep_until(next_poll) => {
                     log::debug!(
                         "Node {} polling relay at {} ({}/{} peers discovered)...",
                         self.id,
@@ -442,6 +608,22 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             }
         }
 
+        Ok(self.coordinator.get_nodes())
+    }
+
+    /// Waits via the relay until at least `min_peers` peers are known, then keeps
+    /// collecting introductions for `settle` so peers that arrive slightly later
+    /// are included too. Returns every known peer.
+    pub async fn discover_peers(
+        &mut self,
+        relay_addr: SocketAddr,
+        min_peers: usize,
+        settle: std::time::Duration,
+    ) -> Result<Vec<NodeDetails>, StruumError> {
+        self.long_poll_relay_for_peers(relay_addr, min_peers).await?;
+        // Polling for an unreachable count just listens until `settle` elapses;
+        // introductions received meanwhile are registered in the coordinator.
+        let _ = tokio::time::timeout(settle, self.long_poll_relay_for_peers(relay_addr, usize::MAX)).await;
         Ok(self.coordinator.get_nodes())
     }
 

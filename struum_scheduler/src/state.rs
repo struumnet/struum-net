@@ -1,10 +1,10 @@
 use std::collections::{HashMap, VecDeque};
-use struum_kernel::Kernel;
 
-use crate::job::{JobId, Job};
+use crate::job::{Job, JobId};
+use crate::work::Work;
 
 pub(crate) struct SchedulerState {
     pub(crate) queue: VecDeque<Job>,
-    pub(crate) results: HashMap<JobId, Kernel>,
+    /// Finished jobs: the resulting work, or the error message.
+    pub(crate) results: HashMap<JobId, Result<Work, String>>,
 }
-

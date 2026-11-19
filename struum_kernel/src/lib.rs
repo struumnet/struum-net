@@ -1,18 +1,24 @@
 use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
-use struum_types::{Buffer, GPUType, StruumError, is_builtin_gpu_type};
+use std::ops::Range;
+use struum_types::{Buffer, GPUType, ShardMode, Shardable, StruumError, is_builtin_gpu_type};
 
 // TODO(slok): Support multiple backend types
 
 // TODO(slok): Currently the local size is hard coded
-// 256 might be enough of invocations needed per work group
-// but if it created a bottleneck then figure something out
+// 128 is the minimum GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS guaranteed by
+// OpenGL ES 3.1, so kernels run on mobile (Android) GPUs as well as desktop.
+// If it creates a bottleneck then figure something out
+const DEFAULT_LOCAL_SIZE: u32 = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufferBinding {
     pub buffer: Buffer,
     pub gpu_type: String,
     pub gpu_struct: String,
+    /// How this buffer is distributed when the kernel is sharded.
+    /// `None` infers it: one element per work item => `Split`, else `Broadcast`.
+    pub shard_mode: Option<ShardMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +32,9 @@ pub struct Kernel {
     work_count: Option<u32>,
     group_size: Option<u32>,
     gpu_source: Option<String>,
+    /// Global index of this kernel's first work item (non-zero for shards).
+    /// Exposed to GLSL as `STRUUM_OFFSET`.
+    offset: u32,
 }
 
 impl Kernel {
@@ -34,11 +43,12 @@ impl Kernel {
             source: source.to_string(),
             entry_point: entry_point.to_string(),
             buffer_bindings: Vec::new(),
-            local_size: 256,
+            local_size: DEFAULT_LOCAL_SIZE,
             work_buffer: None,
             work_count: None,
             group_size: None,
             gpu_source: None,
+            offset: 0,
         }
     }
 
@@ -47,7 +57,43 @@ impl Kernel {
             buffer: buffer,
             gpu_type: T::glsl_type().to_string(),
             gpu_struct: T::glsl(),
+            shard_mode: None,
         });
+    }
+
+    /// Overrides how buffer `name` is distributed when the kernel is sharded.
+    pub fn set_shard_mode(&mut self, name: &str, mode: ShardMode) -> Result<(), StruumError> {
+        let binding = self
+            .buffer_bindings
+            .iter_mut()
+            .find(|b| b.buffer.name == name)
+            .ok_or_else(|| StruumError::NotFound(format!("Buffer '{}' not found", name)))?;
+        binding.shard_mode = Some(mode);
+        Ok(())
+    }
+
+    /// Global index of this kernel's first work item.
+    pub fn get_offset(&self) -> u32 {
+        self.offset
+    }
+
+    fn work_buffer_len(&self) -> Result<usize, StruumError> {
+        let name = self
+            .work_buffer
+            .as_ref()
+            .ok_or(StruumError::NotFound("Work Buffer Empty".to_string()))?;
+        self.get_buffer(name)
+            .map(|b| b.actual_len())
+            .ok_or(StruumError::NotFound("Work Buffer not found".to_string()))
+    }
+
+    fn resolved_mode(&self, binding: &BufferBinding, work_count: usize) -> ShardMode {
+        if self.work_buffer.as_deref() == Some(binding.buffer.name.as_str()) {
+            return ShardMode::Split;
+        }
+        binding
+            .shard_mode
+            .unwrap_or_else(|| ShardMode::infer(&binding.buffer, work_count))
     }
 
     pub fn set_work_buffer(&mut self, name: &str) {
@@ -121,7 +167,9 @@ impl Kernel {
 
         source.push_str("#version 430\n\n");
 
-        source.push_str(&format!("layout(local_size_x = {}) in;\n", self.local_size));
+        source.push_str(&format!("layout(local_size_x = {}) in;\n\n", self.local_size));
+
+        source.push_str(&format!("const uint STRUUM_OFFSET = {}u;\n\n", self.offset));
 
         // Keep track to struct so no duplication occurs
         let mut structs = std::collections::HashSet::new();
@@ -160,7 +208,7 @@ impl Kernel {
             r#"
 void main() {{
     uint id = gl_GlobalInvocationID.x;
-    if (id >= {}) return;
+    if (id >= {}u) return;
     {}(id);
 }}"#,
             self.work_count
@@ -234,5 +282,115 @@ void main() {{
         result.push_str(&source[last..]);
 
         result
+    }
+}
+
+impl Shardable for Kernel {
+    fn work_count(&self) -> usize {
+        self.work_buffer_len().unwrap_or(0)
+    }
+
+    fn offset(&self) -> usize {
+        self.offset as usize
+    }
+
+    fn shard(&self, range: Range<usize>) -> Result<Self, StruumError> {
+        let work_count = self.work_buffer_len()?;
+        let mut shard = self.clone();
+        for binding in shard.buffer_bindings.iter_mut() {
+            let mode = self.resolved_mode(binding, work_count);
+            if mode == ShardMode::Split {
+                if binding.buffer.actual_len() != work_count {
+                    return Err(StruumError::ShardError(format!(
+                        "split buffer '{}' has {} elements but the work count is {}",
+                        binding.buffer.name,
+                        binding.buffer.actual_len(),
+                        work_count
+                    )));
+                }
+                binding.buffer = binding.buffer.slice(range.clone())?;
+            }
+            // Pin the mode so the shard doesn't re-infer with its smaller count.
+            binding.shard_mode = Some(mode);
+        }
+        shard.offset = self.offset + range.start as u32;
+        shard.pack()?;
+        Ok(shard)
+    }
+
+    fn merge(parts: Vec<Self>) -> Result<Self, StruumError> {
+        let first = parts
+            .first()
+            .ok_or_else(|| StruumError::ShardError("cannot merge zero shards".to_string()))?;
+        let mut merged = first.clone();
+        let first_count = first.work_buffer_len()?;
+        for (i, binding) in merged.buffer_bindings.iter_mut().enumerate() {
+            if first.resolved_mode(&first.buffer_bindings[i], first_count) == ShardMode::Split {
+                let pieces = parts
+                    .iter()
+                    .map(|k| {
+                        k.buffer_bindings
+                            .get(i)
+                            .map(|b| b.buffer.clone())
+                            .ok_or_else(|| StruumError::ShardError("shards have different buffer layouts".to_string()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                binding.buffer = Buffer::concat(&pieces)?;
+            }
+        }
+        merged.pack()?;
+        Ok(merged)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kernel() -> Kernel {
+        let x: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        let mut k = Kernel::new("void compute(uint i) { y[i] = p[0] * x[i]; }", "compute");
+        k.add_buffer::<f32>(Buffer::new("p", &[2.0f32]));
+        k.add_buffer::<f32>(Buffer::new("x", &x));
+        k.add_buffer::<f32>(Buffer::empty::<f32>("y", x.len()));
+        k.set_work_buffer("x");
+        k.pack().unwrap();
+        k
+    }
+
+    #[test]
+    fn shard_slices_split_and_keeps_broadcast() {
+        let k = kernel();
+        let s = k.shard(4..10).unwrap();
+        assert_eq!(s.get_work_count(), Some(6));
+        assert_eq!(s.get_offset(), 4);
+        assert_eq!(s.get_buffer("x").unwrap().as_slice::<f32>()[0], 4.0);
+        assert_eq!(s.get_buffer("p").unwrap().actual_len(), 1);
+        assert!(s.get_gpu_source().unwrap().contains("STRUUM_OFFSET = 4u"));
+        assert!(s.get_gpu_source().unwrap().contains("id >= 6u"));
+    }
+
+    #[test]
+    fn shard_merge_round_trip() {
+        let k = kernel();
+        let parts: Vec<Kernel> = struum_types::split_ranges(10, 3)
+            .into_iter()
+            .map(|r| k.shard(r).unwrap())
+            .collect();
+        let merged = Kernel::merge(parts).unwrap();
+        assert_eq!(merged.get_work_count(), Some(10));
+        assert_eq!(
+            merged.get_buffer("x").unwrap().as_slice::<f32>(),
+            k.get_buffer("x").unwrap().as_slice::<f32>()
+        );
+        assert_eq!(merged.get_buffer("p").unwrap().as_slice::<f32>(), &[2.0]);
+    }
+
+    #[test]
+    fn nested_shards_keep_modes() {
+        // A 1-element shard must not re-infer the 1-element param buffer as split.
+        let k = kernel();
+        let s = k.shard(0..1).unwrap().shard(0..1).unwrap();
+        assert_eq!(s.get_buffer("p").unwrap().as_slice::<f32>(), &[2.0]);
     }
 }

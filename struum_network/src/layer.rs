@@ -85,6 +85,8 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         let stream = TcpStream::connect(target_addr)
             .await
             .map_err(|e| NetworkConnectionError(format!("Failed to connect to {}: {}", target_addr, e)))?;
+        // Request/response traffic: don't let Nagle + delayed ACK stall small packets.
+        let _ = stream.set_nodelay(true);
 
         self.connections
             .insert(target_addr, Arc::new(Mutex::new(stream)));
@@ -179,39 +181,34 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         Ok((message, src))
     }
 
-    /// This methods allows for the nodes to entirely all the data, to the node tcp connection
-    /// was initialized using `initialize_tcp_connection()`.
+    /// Sends a packet over the connection to `addr` established with
+    /// `initialize_tcp_connection*()` or `accept_tcp_connection()`.
     /// Uses length-prefixed framing: 4-byte big-endian length header followed by bincode payload.
     pub async fn send_tcp_data(
         &mut self,
         addr: SocketAddr,
         data: TcpPacket,
     ) -> Result<(), StruumError> {
-        let data_serialized =
-            bincode::serialize(&data).map_err(|e| NetworkConnectionError(e.to_string()))?;
-        let len = data_serialized.len() as u32;
-        let connection = self
-            .connections
-            .get(&addr)
+        self.peer(&addr)
             .ok_or(NetworkConnectionError(
                 "Failed to find existing connection between nodes!".to_string(),
             ))?
-            .clone();
-        let mut stream = connection.lock().await;
-        stream
-            .write_all(&len.to_be_bytes())
+            .send(&data)
             .await
-            .map_err(|e| NetworkConnectionError(e.to_string()))?;
-        stream
-            .write_all(&data_serialized)
-            .await
-            .map_err(|e| NetworkConnectionError(e.to_string()))?;
-        stream
-            .flush()
-            .await
-            .map_err(|e| NetworkConnectionError(e.to_string()))?;
-        log::debug!("Sent TCP packet ({} bytes) to {}", data_serialized.len(), addr);
-        Ok(())
+    }
+
+    /// Returns a cloneable handle to the connection with `addr`, usable from
+    /// other tasks without borrowing the `NetworkLayer`.
+    pub fn peer(&self, addr: &SocketAddr) -> Option<PeerConnection> {
+        self.connections.get(addr).map(|stream| PeerConnection {
+            addr: *addr,
+            stream: stream.clone(),
+        })
+    }
+
+    /// Drops the connection with `addr`, if any.
+    pub fn disconnect(&mut self, addr: &SocketAddr) {
+        self.connections.remove(addr);
     }
 
     /// Accepts an incoming TCP connection, stores it in the connection pool,
@@ -222,6 +219,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             .accept()
             .await
             .map_err(|e| NetworkConnectionError(format!("Failed to accept TCP connection: {}", e)))?;
+        let _ = stream.set_nodelay(true);
         log::info!("Accepted TCP connection from {}", peer_addr);
         self.connections
             .insert(peer_addr, Arc::new(Mutex::new(stream)));
@@ -229,20 +227,69 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     }
 
     /// Reads a length-prefixed TcpPacket from an established connection.
-    /// Expects a 4-byte big-endian length header followed by bincode payload.
     pub async fn recv_tcp_data(
         &mut self,
         addr: &SocketAddr,
     ) -> Result<TcpPacket, StruumError> {
-        let connection = self
-            .connections
-            .get(addr)
-            .ok_or(NetworkConnectionError(
-                format!("No TCP connection found for {}", addr),
-            ))?
-            .clone();
-        let mut stream = connection.lock().await;
+        self.peer(addr)
+            .ok_or(NetworkConnectionError(format!("No TCP connection found for {}", addr)))?
+            .recv()
+            .await
+    }
+}
 
+/// Handle to one TCP connection. Cloning it shares the same stream, so a
+/// request/response exchange should hold it for both halves (see [`PeerConnection::request`]).
+#[derive(Debug, Clone)]
+pub struct PeerConnection {
+    pub addr: SocketAddr,
+    stream: Arc<Mutex<TcpStream>>,
+}
+
+impl PeerConnection {
+    /// Sends one length-prefixed packet.
+    pub async fn send(&self, packet: &TcpPacket) -> Result<(), StruumError> {
+        let mut stream = self.stream.lock().await;
+        Self::write_packet(&mut stream, self.addr, packet).await
+    }
+
+    /// Receives one length-prefixed packet.
+    pub async fn recv(&self) -> Result<TcpPacket, StruumError> {
+        let mut stream = self.stream.lock().await;
+        Self::read_packet(&mut stream, self.addr).await
+    }
+
+    /// Sends `packet` and waits for the reply while holding the connection.
+    pub async fn request(&self, packet: &TcpPacket) -> Result<TcpPacket, StruumError> {
+        let mut stream = self.stream.lock().await;
+        Self::write_packet(&mut stream, self.addr, packet).await?;
+        Self::read_packet(&mut stream, self.addr).await
+    }
+
+    async fn write_packet(
+        stream: &mut TcpStream,
+        addr: SocketAddr,
+        packet: &TcpPacket,
+    ) -> Result<(), StruumError> {
+        let payload_len = bincode::serialized_size(packet)
+            .map_err(|e| NetworkConnectionError(e.to_string()))? as usize;
+        // Header and payload in one buffer => one write, one TCP segment burst.
+        let mut frame = Vec::with_capacity(4 + payload_len);
+        frame.extend_from_slice(&(payload_len as u32).to_be_bytes());
+        bincode::serialize_into(&mut frame, packet).map_err(|e| NetworkConnectionError(e.to_string()))?;
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|e| NetworkConnectionError(e.to_string()))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| NetworkConnectionError(e.to_string()))?;
+        log::debug!("Sent TCP packet ({} bytes) to {}", payload_len, addr);
+        Ok(())
+    }
+
+    async fn read_packet(stream: &mut TcpStream, addr: SocketAddr) -> Result<TcpPacket, StruumError> {
         let mut len_buf = [0u8; 4];
         stream
             .read_exact(&mut len_buf)
@@ -250,7 +297,6 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             .map_err(|e| NetworkConnectionError(format!("Failed to read TCP length header from {}: {}", addr, e)))?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
-        // Read payload
         let mut payload = vec![0u8; len];
         stream
             .read_exact(&mut payload)

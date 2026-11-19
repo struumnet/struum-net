@@ -1,5 +1,6 @@
 use crate::gl_buffer::GlBuffer;
 use crate::gl_context::GlContext;
+use crate::glsl::adapt_source;
 use crate::shader::Shader;
 
 use std::collections::HashMap;
@@ -18,7 +19,7 @@ impl OpenglBackend {
         GlContext::ensure_current()?;
 
         // Compile Shader
-        let shader = Shader::new(shader)?;
+        let shader = Shader::new(&adapt_source(shader)?)?;
 
         // Construct opengl buffers
         let mut gl_buffers = HashMap::new();
@@ -40,13 +41,10 @@ impl OpenglBackend {
         GlContext::ensure_current()?;
 
         // Compile Shader
-        let shader = Shader::new(
-            kernel.get_gpu_source()
-            .ok_or(StruumError::NotFound(
-                "GPU Source is None, Maybe kernel is not packed using 'pack' method"
-                    .to_string()
-            ))?
-        )?;
+        let source = kernel.get_gpu_source().ok_or(StruumError::NotFound(
+            "GPU Source is None, Maybe kernel is not packed using 'pack' method".to_string(),
+        ))?;
+        let shader = Shader::new(&adapt_source(source)?)?;
 
         // Construct opengl buffers
         let mut gl_buffers = HashMap::new();
@@ -100,14 +98,14 @@ impl OpenglBackend {
             .get_mut(buffer_name)
             .ok_or_else(|| StruumError::NotFound(buffer_name.to_string()))?;
 
-        let data = gl_buffer.read();
+        let data = gl_buffer.read()?;
 
         Ok(bytemuck::cast_slice(&data).to_vec())
     }
 
     pub fn sync_to_kernel(&self, kernel: &mut Kernel) -> Result<(), StruumError> {
         for (_, gl_buffer) in &self.gl_buffers {
-            let data = gl_buffer.read();
+            let data = gl_buffer.read()?;
 
             let binding = kernel
                 .get_buffer_bindings_mut()
