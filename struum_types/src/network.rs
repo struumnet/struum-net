@@ -35,6 +35,36 @@ pub enum TcpPacket {
     REGISTERTASK(RegisterTaskPacket),
     TASKDATA(TaskDataPacket),
     RESULT(ResultPacket),
+    // New variants are appended so existing bincode tags stay stable.
+    WORK(WorkPacket),
+    WORKERROR(WorkErrorPacket),
+}
+
+/// Kind of work carried by a [`WorkPacket`].
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkKind {
+    /// Serialized GLSL `Kernel`.
+    Gpu,
+    /// Serialized WebAssembly `CpuTask`.
+    Cpu,
+}
+
+/// A unit of work (possibly one shard of a larger job). Answered with
+/// `RESULT` (same serialized type) or `WORKERROR`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorkPacket {
+    pub task_id: String,
+    pub sender_id: UID,
+    pub kind: WorkKind,
+    pub data: Vec<u8>,
+}
+
+/// Reports that a worker failed to execute a [`WorkPacket`] (bad shader, wasm trap, ...).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorkErrorPacket {
+    pub task_id: String,
+    pub sender_id: UID,
+    pub message: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

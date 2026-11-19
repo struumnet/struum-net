@@ -1,0 +1,19 @@
+[package]
+name = "struum_worker"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone struum compute worker (desktop or Android)"
+
+[features]
+# Force the headless EGL / OpenGL ES 3.1 backend on desktop (always on for Android).
+egl = ["struum_opengl/egl"]
+
+[dependencies]
+struum_node = { workspace = true }
+struum_kernel = { workspace = true }
+struum_types = { workspace = true }
+struum_opengl = { workspace = true }
+struum_cpu = { workspace = true }
+tokio = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

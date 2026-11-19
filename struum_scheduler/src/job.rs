@@ -1,18 +1,19 @@
 use uuid::Uuid;
-use struum_kernel::Kernel;
+
+use crate::work::Work;
 
 pub type JobId = String;
 
 pub(crate) struct Job {
     pub(crate) id: JobId,
-    pub(crate) kernel: Kernel,
+    pub(crate) work: Work,
 }
 
 impl Job {
-    pub(crate) fn new(kernel: Kernel) -> Self {
+    pub(crate) fn new(work: Work) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            kernel,
+            work,
         }
     }
 }

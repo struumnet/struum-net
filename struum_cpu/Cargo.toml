@@ -1,0 +1,12 @@
+[package]
+name = "struum_cpu"
+version = "0.1.0"
+edition = "2024"
+description = "CPU tasks for struum: WebAssembly modules executed with wasmtime"
+
+[dependencies]
+struum_types = { workspace = true }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+log = { workspace = true }
+wasmtime = { version = "48.0.9", default-features = false, features = ["cranelift", "runtime", "std", "wat", "parallel-compilation", "anyhow"] }

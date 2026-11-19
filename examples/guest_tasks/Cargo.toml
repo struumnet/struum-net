@@ -1,0 +1,20 @@
+[package]
+name = "struum_guest_tasks"
+version = "0.1.0"
+edition = "2024"
+description = "Example struum CPU tasks, compiled to WebAssembly"
+
+# Standalone: built for wasm32-unknown-unknown, not part of the host workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+struum_guest = { path = "../../struum_guest" }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"

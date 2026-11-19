@@ -1,0 +1,8 @@
+[package]
+name = "struum_guest"
+version = "0.1.0"
+edition = "2024"
+description = "Write struum CPU tasks in Rust (compile to wasm32-unknown-unknown)"
+
+[dependencies]
+bytemuck = { workspace = true }
