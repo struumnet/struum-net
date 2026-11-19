@@ -117,7 +117,10 @@ struum_guest::tasks!(count_primes);
 - Buffers with one element per work item are **split**; anything else (parameters, tables) is
   **broadcast** to every shard. Override with `set_shard_mode(name, ShardMode::…)`.
   Index `i` in a shard is global index `ctx.offset() + i` (`STRUUM_OFFSET + i` in GLSL).
-- Outputs must be split (map-style); do reductions after the merge.
+- Outputs are split (map-style), or `ShardMode::SumF32` accumulators: every shard gets a zeroed
+  copy and the copies are summed on merge (an all-reduce, e.g. for gradients; CPU tasks only).
+- Workers leave buffers the task didn't change out of their results, and the requester restores
+  them, so inputs aren't sent back.
 - A peer that times out (`shard_timeout`) or disconnects has its shard reassigned
   (up to `max_attempts`) and is dropped. A task error (wasm trap, shader compile error) fails the job.
 - On each worker a CPU task is further split across all cores.
@@ -132,6 +135,51 @@ cargo run --release --example sharded_cpu    # or sharded_gpu
 
 Workers run a CPU and a GPU self-test on startup and advertise `Cpu` if the GPU is unavailable
 (override with `WORKER_BACKEND=cpu|opengl`).
+
+## PoC: training a neural network across the network
+
+`examples/mnist_train.rs` trains a 784-128-10 MLP on MNIST handwritten digits using every worker,
+then runs the trained model on the 10k test images, sharded the same way.
+
+- **Training** is data-parallel SGD. Every step the 1000-image minibatch is split across workers.
+  Each worker computes its slice's gradient in WebAssembly (`mlp_grad` in `examples/guest_tasks`).
+  The gradients come back as a `SumF32` buffer, and the requester applies Adam.
+- **Checks:** at step 0 the network gradient is compared with a local computation. Each epoch
+  reports the test accuracy.
+- **Inference** runs `mlp_predict` over the test set, sharded across workers. It prints accuracy,
+  throughput, which worker did what, and a few digits as ASCII art. The weights are saved to
+  `data/mnist_mlp.bin`.
+
+```bash
+scripts/fetch-mnist.sh                       # ~11 MB download into data/mnist (md5-checked)
+scripts/build-guest-tasks.sh
+cargo run --release -p struum_relay
+NODE_ID=51 NODE_UDP_PORT=35001 NODE_TCP_PORT=35011 cargo run --release -p struum_worker
+adb shell 'RELAY_ADDR=<pc-lan-ip>:39001 /data/local/tmp/struum_worker'     # optional: a phone
+RELAY_ADDR=<pc-lan-ip>:39001 cargo run --release --example mnist_train
+```
+
+Env: `EPOCHS` (3), `BATCH` (1000), `HIDDEN` (128), `LR` (0.002), `SHARDS_PER_PEER` (2), `MIN_PEERS` (2).
+`MODE=local` trains in-process on all local cores (a baseline), and `MODE=infer` reloads the saved
+weights and only runs inference.
+
+Expected result: about 92% test accuracy after epoch 1 and about 95% after epoch 3. Training is
+identical whether it runs locally, on 2 desktop workers, or on desktop + phone, because the step-0
+gradient matches local to about 1e-8.
+
+Performance notes (measured on a 12-core PC and a Galaxy phone on 2.4 GHz Wi-Fi):
+
+| Setup | Time per step |
+|---|---|
+| Local, 12 cores | ~23 ms |
+| 2 desktop workers on the same PC | ~80 ms (serialization + loopback) |
+| PC + phone | ~0.7 s |
+
+This model is communication-bound. Every step ships the 400 KB of weights in and 400 KB of
+gradients out, and the phone link measured 0.6 MB/s, while the phone's own computation was
+70–120 ms per shard. Distributing pays off when computation per byte sent is high (bigger batches,
+compute-heavy models). Keep the phone awake (`adb shell svc power stayon usb`): when Android dozes,
+it throttles Wi-Fi, the shard times out, and it is reassigned to another worker.
 
 ## Examples
 

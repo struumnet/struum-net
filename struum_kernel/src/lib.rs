@@ -299,6 +299,13 @@ impl Shardable for Kernel {
         let mut shard = self.clone();
         for binding in shard.buffer_bindings.iter_mut() {
             let mode = self.resolved_mode(binding, work_count);
+            if mode == ShardMode::SumF32 {
+                // Summing into one buffer from many GPU threads would need float atomics.
+                return Err(StruumError::ShardError(format!(
+                    "buffer '{}': SumF32 is only supported for CPU tasks",
+                    binding.buffer.name
+                )));
+            }
             if mode == ShardMode::Split {
                 if binding.buffer.actual_len() != work_count {
                     return Err(StruumError::ShardError(format!(

@@ -6,8 +6,9 @@
 //! [`ShardMode::Broadcast`] are sent whole to every shard. Merging concatenates
 //! the `Split` buffers back in range order.
 //!
-//! Outputs must be `Split` (map-style work). Reductions are done by the caller
-//! after merging.
+//! Outputs are either `Split` (map-style: one result per work item) or
+//! [`ShardMode::SumF32`] (every shard gets a zeroed copy and the copies are
+//! summed element-wise on merge, like an all-reduce, e.g. for gradients).
 
 use serde_derive::{Deserialize, Serialize};
 use std::ops::Range;
@@ -20,6 +21,9 @@ pub enum ShardMode {
     Split,
     /// Copied whole to every shard (parameters, lookup tables, ...).
     Broadcast,
+    /// `f32` accumulator: each shard gets a zeroed copy of the same size and the
+    /// shards' copies are summed element-wise on merge. Never inferred.
+    SumF32,
 }
 
 impl ShardMode {
@@ -109,6 +113,7 @@ pub fn shard_buffers(
                     b.buffer.slice(range.clone())?
                 }
                 ShardMode::Broadcast => b.buffer.clone(),
+                ShardMode::SumF32 => zeroed(&b.buffer)?,
             };
             // Pin the mode so shards of shards don't re-infer with a smaller count.
             Ok(BoundBuffer { buffer, mode: Some(mode) })
@@ -117,7 +122,8 @@ pub fn shard_buffers(
 }
 
 /// Merges per-shard buffer lists (all in the same binding order).
-/// `Split` buffers are concatenated; `Broadcast` buffers are taken from the first shard.
+/// `Split` buffers are concatenated, `SumF32` buffers summed, and `Broadcast` buffers
+/// are taken from the first shard.
 pub fn merge_buffers(
     parts: Vec<Vec<BoundBuffer>>,
     work_counts: &[usize],
@@ -140,10 +146,57 @@ pub fn merge_buffers(
                     Buffer::concat(&pieces)?
                 }
                 ShardMode::Broadcast => parts[0][i].buffer.clone(),
+                ShardMode::SumF32 => {
+                    let pieces: Vec<&Buffer> = parts.iter().map(|p| &p[i].buffer).collect();
+                    sum_f32(&pieces)?
+                }
             };
             Ok(BoundBuffer { buffer, mode: parts[0][i].mode })
         })
         .collect()
+}
+
+fn check_f32(buffer: &Buffer) -> Result<(), StruumError> {
+    if buffer.stride == 0
+        || !buffer.stride.is_multiple_of(4)
+        || !buffer.data.len().is_multiple_of(buffer.stride)
+    {
+        return Err(StruumError::ShardError(format!(
+            "SumF32 buffer '{}' must hold f32 values (stride {}, {} bytes)",
+            buffer.name,
+            buffer.stride,
+            buffer.data.len()
+        )));
+    }
+    Ok(())
+}
+
+fn zeroed(buffer: &Buffer) -> Result<Buffer, StruumError> {
+    check_f32(buffer)?;
+    Ok(Buffer { name: buffer.name.clone(), data: vec![0u8; buffer.data.len()], stride: buffer.stride })
+}
+
+/// Element-wise f32 sum of same-sized buffers.
+fn sum_f32(parts: &[&Buffer]) -> Result<Buffer, StruumError> {
+    let first = parts[0];
+    check_f32(first)?;
+    let mut acc: Vec<f32> = vec![0.0; first.data.len() / 4];
+    for part in parts {
+        if part.data.len() != first.data.len() || part.stride != first.stride {
+            return Err(StruumError::ShardError(format!(
+                "cannot sum buffer '{}': shards have {} and {} bytes",
+                first.name,
+                first.data.len(),
+                part.data.len()
+            )));
+        }
+        // Read unaligned: Vec<u8> gives no f32 alignment guarantee.
+        for (a, chunk) in acc.iter_mut().zip(part.data.chunks_exact(4)) {
+            *a += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+    }
+    let data = acc.iter().flat_map(|v| v.to_le_bytes()).collect();
+    Ok(Buffer { name: first.name.clone(), data, stride: first.stride })
 }
 
 #[cfg(test)]
@@ -188,5 +241,29 @@ mod tests {
         let merged = merge_buffers(shards, &[3, 3]).unwrap();
         assert_eq!(merged[0].buffer.as_slice::<f32>(), x.as_slice());
         assert_eq!(merged[1].buffer.as_slice::<f32>(), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn sum_buffers_are_zeroed_per_shard_and_summed() {
+        let x: Vec<f32> = (0..4).map(|v| v as f32).collect();
+        let mut acc = BoundBuffer::new(Buffer::new("acc", &[5.0f32, 5.0, 5.0]));
+        acc.mode = Some(ShardMode::SumF32);
+        let bufs = vec![BoundBuffer::new(Buffer::new("x", &x)), acc];
+        let mut shards: Vec<_> = split_ranges(4, 2)
+            .into_iter()
+            .map(|r| shard_buffers(&bufs, 4, r).unwrap())
+            .collect();
+        assert_eq!(shards[0][1].buffer.as_slice::<f32>(), &[0.0, 0.0, 0.0]);
+        // Each shard accumulates the sum of its x values into every slot.
+        for shard in shards.iter_mut() {
+            let s: f32 = shard[0].buffer.as_slice::<f32>().iter().sum();
+            shard[1].buffer = Buffer::new("acc", &[s, 2.0 * s, 1.0]);
+        }
+        let merged = merge_buffers(shards, &[2, 2]).unwrap();
+        assert_eq!(merged[1].buffer.as_slice::<f32>(), &[6.0, 12.0, 2.0]);
+
+        let mut bad = BoundBuffer::new(Buffer::new("b", &[1u8, 2, 3]));
+        bad.mode = Some(ShardMode::SumF32);
+        assert!(shard_buffers(&[bad], 3, 0..1).is_err());
     }
 }

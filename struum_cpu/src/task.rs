@@ -59,11 +59,12 @@ impl CpuTask {
         &self.entry
     }
 
-    pub(crate) fn buffers(&self) -> &[BoundBuffer] {
+    /// All buffers, in the order the guest sees them.
+    pub fn buffers(&self) -> &[BoundBuffer] {
         &self.buffers
     }
 
-    pub(crate) fn buffers_mut(&mut self) -> &mut [BoundBuffer] {
+    pub fn buffers_mut(&mut self) -> &mut [BoundBuffer] {
         &mut self.buffers
     }
 

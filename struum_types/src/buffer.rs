@@ -27,6 +27,24 @@ impl Buffer {
         }
     }
 
+    /// A buffer whose elements are rows of `row_len` values each (e.g. one image per
+    /// element), so sharding splits it by row.
+    pub fn from_rows<T: bytemuck::Pod>(name: &str, data: &[T], row_len: usize) -> Result<Self, StruumError> {
+        if row_len == 0 || !data.len().is_multiple_of(row_len) {
+            return Err(StruumError::ShardError(format!(
+                "buffer '{}': {} values do not divide into rows of {}",
+                name,
+                data.len(),
+                row_len
+            )));
+        }
+        Ok(Self {
+            name: name.to_string(),
+            data: bytemuck::cast_slice(data).to_vec(),
+            stride: row_len * std::mem::size_of::<T>(),
+        })
+    }
+
     pub fn as_slice<T: bytemuck::Pod>(&self) -> &[T] {
         bytemuck::cast_slice(&self.data)
     }

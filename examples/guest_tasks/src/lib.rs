@@ -8,6 +8,8 @@
 use bytemuck::{Pod, Zeroable};
 use struum_guest::TaskContext;
 
+pub mod mlp;
+
 /// Must match the host's `#[gpu_type] struct Param` (repr(C), two f32).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -68,4 +70,43 @@ fn is_prime(n: u32) -> bool {
     true
 }
 
-struum_guest::tasks!(gradient, count_primes);
+/// MLP training step for one slice of a minibatch.
+/// Buffers: 0 = images (u8 rows, split), 1 = labels (u32, split, work buffer),
+/// 2 = config `[input, hidden, classes]`, 3 = params (broadcast),
+/// 4 = grads (SumF32, `param_count + 2`: gradient sums, then loss sum and correct count).
+fn mlp_grad(ctx: &TaskContext) {
+    let images = ctx.rows::<u8>(0);
+    let labels = ctx.input::<u32>(1);
+    let d = mlp::Dims::from_config(ctx.input::<u32>(2));
+    let params = ctx.input::<f32>(3);
+    let grads = ctx.output::<f32>(4);
+    let p = d.param_count();
+    assert_eq!(params.len(), p, "params length does not match config");
+    assert_eq!(grads.len(), p + 2, "grads must have param_count + 2 values");
+    assert_eq!(ctx.stride(0), d.input, "image rows must have `input` pixels");
+
+    let mut scratch = mlp::Scratch::new(d);
+    let (mut loss, mut correct) = (0.0f32, 0.0f32);
+    for (pixels, &label) in images.zip(labels) {
+        let (l, ok) = mlp::accumulate_grad(d, params, pixels, label, &mut grads[..p], &mut scratch);
+        loss += l;
+        correct += ok as u32 as f32;
+    }
+    grads[p] += loss;
+    grads[p + 1] += correct;
+}
+
+/// MLP inference. Buffers: 0 = images (u8 rows, split), 1 = config, 2 = params
+/// (broadcast), 3 = predictions (u32, split, work buffer).
+fn mlp_predict(ctx: &TaskContext) {
+    let images = ctx.rows::<u8>(0);
+    let d = mlp::Dims::from_config(ctx.input::<u32>(1));
+    let params = ctx.input::<f32>(2);
+    let preds = ctx.output::<u32>(3);
+    let mut scratch = mlp::Scratch::new(d);
+    for (pixels, pred) in images.zip(preds.iter_mut()) {
+        *pred = mlp::predict(d, params, pixels, &mut scratch);
+    }
+}
+
+struum_guest::tasks!(gradient, count_primes, mlp_grad, mlp_predict);

@@ -101,10 +101,15 @@ pub(crate) async fn run_sharded(
 
     let ranges = split_ranges(count, peers.len() * opts.shards_per_peer.max(1));
     let expected: Vec<usize> = ranges.iter().map(|r| r.len()).collect();
-    let payloads: Vec<Arc<Vec<u8>>> = ranges
+    // Keep each shard's request: results leave out unchanged buffers, restored from it.
+    let payloads: Vec<Arc<ShardPayload>> = ranges
         .iter()
-        .map(|r| work.shard(r.clone()).and_then(|s| s.to_bytes()).map(Arc::new))
-        .collect::<Result<_, _>>()?;
+        .map(|r| {
+            let work = work.shard(r.clone())?;
+            let bytes = work.to_bytes()?;
+            Ok(Arc::new(ShardPayload { work, bytes }))
+        })
+        .collect::<Result<_, StruumError>>()?;
     drop(work);
 
     let shards = payloads.len();
@@ -189,13 +194,20 @@ pub(crate) async fn run_sharded(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One shard as sent to peers, plus the request itself for restoring elided buffers.
+struct ShardPayload {
+    work: Work,
+    bytes: Vec<u8>,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn peer_loop(
     peer: PeerConnection,
     sender_id: UID,
     kind: WorkKind,
     job_id: &str,
     shared: &Shared,
-    payloads: &[Arc<Vec<u8>>],
+    payloads: &[Arc<ShardPayload>],
     expected: &[usize],
     opts: &ShardOptions,
 ) -> Result<(PeerExit, Vec<SocketAddr>), StruumError> {
@@ -220,12 +232,14 @@ async fn peer_loop(
             task_id: format!("{job_id}/{idx}"),
             sender_id,
             kind,
-            data: payloads[idx].as_ref().clone(),
+            data: payloads[idx].bytes.clone(),
         });
         log::debug!("Shard {} (attempt {}) -> {}", idx, attempt + 1, peer.addr);
 
         let failure = match tokio::time::timeout(opts.shard_timeout, peer.request(&packet)).await {
-            Ok(Ok(TcpPacket::RESULT(res))) => match Work::from_bytes(kind, &res.result_data) {
+            Ok(Ok(TcpPacket::RESULT(res))) => match Work::from_bytes(kind, &res.result_data)
+                .and_then(|mut w| w.restore_elided(&payloads[idx].work).map(|()| w))
+            {
                 Ok(work) if work.work_count() == expected[idx] => {
                     shared.results.lock().await[idx] = Some(work);
                     shared.remaining.fetch_sub(1, Ordering::SeqCst);
