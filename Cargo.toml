@@ -12,6 +12,7 @@ members = [
     "struum_worker",
     "struum_cpu",
     "struum_guest",
+    "struum_tui",
 ]
 exclude = ["examples/guest_tasks"]
 resolver="3"

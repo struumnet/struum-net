@@ -1,0 +1,30 @@
+[package]
+name = "struum_tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal dashboard: join a struum network as a worker and watch your contribution"
+
+[[bin]]
+name = "struum-tui"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Use the headless EGL / OpenGL ES backend instead of glfw (see struum_opengl).
+egl = ["struum_opengl/egl"]
+
+[dependencies]
+struum_node = { workspace = true }
+struum_types = { workspace = true }
+struum_kernel = { workspace = true }
+struum_cpu = { workspace = true }
+struum_opengl = { workspace = true }
+tokio = { workspace = true }
+log = { workspace = true }
+bincode = { workspace = true }
+ratatui = "=0.29.0"
+
+[dev-dependencies]
+struum_relay = { workspace = true }

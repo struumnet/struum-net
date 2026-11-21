@@ -19,6 +19,20 @@ Worker env: `RELAY_ADDR`, `NODE_ID` (random), `NODE_UDP_PORT` (34255), `NODE_TCP
 
 To run several workers on one machine, give each its own `NODE_ID`, `NODE_UDP_PORT` and `NODE_TCP_PORT`.
 
+## TUI
+
+`struum-tui` joins a network as a worker (like `struum_worker`) and shows it live: your
+contribution (shards you ran for others, MB in/out, busy time, utilisation, shards/s over the last
+minute), what each neighbour did for you and you for them, peers by backend, and a log pane.
+
+```bash
+cargo run -p struum_relay                               # relay, if none is running
+cargo run --release -p struum_tui -- --relay <relay-ip>:39001 [--backend cpu|opengl]
+```
+
+Keys: `q` quit, `Tab` change neighbour sort, `?` help. Ports default to OS-assigned
+(`--udp-port`, `--tcp-port`, or `NODE_UDP_PORT` / `NODE_TCP_PORT`).
+
 ## Android worker
 
 Workers run on Android through headless EGL with **OpenGL ES 3.1** compute shaders. Kernels are
