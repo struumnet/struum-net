@@ -3,16 +3,33 @@ use std::ops::Range;
 
 use crate::StruumError;
 
+/// A named, untyped byte buffer: the input and output data of every job.
+///
+/// Elements are `stride` bytes each; most buffers hold one Pod value per element, while
+/// [`Buffer::from_rows`] makes each element a row of values. Sharding slices buffers by
+/// element.
+///
+/// ```
+/// use struum_types::Buffer;
+///
+/// let x = Buffer::new("x", &[1.0f32, 2.0, 3.0, 4.0]);
+/// assert_eq!(x.actual_len(), 4);
+/// assert_eq!(x.slice(1..3)?.as_slice::<f32>(), &[2.0, 3.0]);
+/// # Ok::<(), struum_types::StruumError>(())
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Buffer {
+    /// Name the task or kernel uses for this buffer.
     pub name: String,
     /// Raw bytes: encoded in one block rather than element by element.
     #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
+    /// Bytes per element.
     pub stride: usize,
 }
 
 impl Buffer {
+    /// A buffer holding a copy of `data`, one element per value.
     pub fn new<T: bytemuck::Pod>(name: &str, data: &[T]) -> Self {
         Self {
             name: name.to_string(),
@@ -21,6 +38,7 @@ impl Buffer {
         }
     }
 
+    /// A zero-filled buffer of `count` elements of `T` (typically an output).
     pub fn empty<T: bytemuck::Pod>(name: &str, count: usize) -> Self {
         Self {
             name: name.to_string(),
@@ -47,6 +65,10 @@ impl Buffer {
         })
     }
 
+    /// Views the data as `T` values.
+    ///
+    /// # Panics
+    /// If the data length is not a multiple of `size_of::<T>()` or is misaligned for `T`.
     pub fn as_slice<T: bytemuck::Pod>(&self) -> &[T] {
         bytemuck::cast_slice(&self.data)
     }

@@ -40,16 +40,19 @@ impl ShardMode {
 /// A buffer together with how it is distributed across shards.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoundBuffer {
+    /// The data.
     pub buffer: Buffer,
     /// Explicit mode; `None` means "infer from the work count".
     pub mode: Option<ShardMode>,
 }
 
 impl BoundBuffer {
+    /// A buffer whose mode is inferred from the work count.
     pub fn new(buffer: Buffer) -> Self {
         Self { buffer, mode: None }
     }
 
+    /// The explicit mode, or [`ShardMode::infer`] for `work_count` items.
     pub fn resolved_mode(&self, work_count: usize) -> ShardMode {
         self.mode
             .unwrap_or_else(|| ShardMode::infer(&self.buffer, work_count))
