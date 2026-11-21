@@ -251,17 +251,18 @@ async fn peer_loop(
             continue;
         };
 
-        let packet = TcpPacket::WORK(WorkPacket {
+        // The shard bytes are written straight from `payloads`, not copied into the packet.
+        let header = TcpPacket::WORK(WorkPacket {
             task_id: format!("{job_id}/{idx}"),
             sender_id,
             kind,
-            data: payloads[idx].bytes.clone(),
+            data: Vec::new(),
         });
         log::debug!("Shard {} (attempt {}) -> {}", idx, attempt + 1, peer.addr);
 
         shared.bytes_sent.fetch_add(payloads[idx].bytes.len() as u64, Ordering::Relaxed);
         let sent_at = Instant::now();
-        let reply = tokio::time::timeout(opts.shard_timeout, peer.request(&packet)).await;
+        let reply = tokio::time::timeout(opts.shard_timeout, peer.request_with_payload(&header, &payloads[idx].bytes)).await;
         if let Ok(Ok(TcpPacket::RESULT(res))) = &reply {
             shared.bytes_received.fetch_add(res.result_data.len() as u64, Ordering::Relaxed);
         }

@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use struum_network::layer::NetworkLayer;
+use struum_network::layer::{NetworkLayer, PeerConnection};
 use struum_types::StruumError;
 use struum_types::network::{
     IntroductionPacket, NodeBackend, NodeRole, ResultPacket, TcpPacket, UID, UdpPacket, WorkKind,
@@ -199,3 +199,52 @@ async fn malformed_udp_datagrams_are_rejected() {
     assert!(matches!(err, StruumError::SerializationError(_)), "{err}");
 }
 
+#[test]
+fn payload_frames_match_full_packet_frames() {
+    let data: Vec<u8> = (0..1000).map(|i| (i % 7) as u8).collect();
+    let frame = PeerConnection::frame_with_payload(&work(Vec::new()), data.len()).unwrap();
+    let mut wire = frame.clone();
+    wire.extend_from_slice(&data);
+
+    let full = bincode::serialize(&work(data)).unwrap();
+    assert_eq!(&wire[..4], &(full.len() as u32).to_be_bytes());
+    assert_eq!(&wire[4..], full.as_slice());
+
+    // A packet that doesn't end in an empty byte field is refused.
+    assert!(PeerConnection::frame_with_payload(&work(vec![1]), 10).is_err());
+}
+
+#[tokio::test]
+async fn request_with_payload_round_trips() {
+    let mut server = layer().await;
+    let mut client = layer().await;
+    let (client_addr, server_addr) = connect(&mut server, &mut client).await;
+
+    let to_server = server.peer(&client_addr).unwrap();
+    let echo = tokio::spawn(async move {
+        let packet = to_server.recv().await.unwrap();
+        to_server.send(&packet).await.unwrap();
+    });
+
+    let data: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 253) as u8).collect();
+    let reply = timeout(WAIT, client.peer(&server_addr).unwrap().request_with_payload(&work(Vec::new()), &data))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, work(data));
+    echo.await.unwrap();
+}
+
+#[tokio::test]
+async fn oversized_length_headers_are_refused() {
+    let mut server = layer().await;
+    let server_addr = local(server.tcp_port);
+    let (accepted, raw) =
+        tokio::join!(server.accept_tcp_connection(), tokio::net::TcpStream::connect(server_addr));
+    let client_addr = accepted.unwrap();
+    let mut raw = raw.unwrap();
+
+    raw.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
+    let err = timeout(WAIT, server.recv_tcp_data(&client_addr)).await.unwrap().unwrap_err();
+    assert!(err.to_string().contains("limit"), "{err}");
+}

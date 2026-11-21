@@ -57,6 +57,23 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     }
 }
 
+/// Socket buffer size for peer connections: large shards on a high-latency
+/// Wi-Fi link need more than the default window in flight.
+const SOCKET_BUFFER_BYTES: usize = 4 << 20;
+
+/// Largest packet accepted from a peer. The length header comes off the wire, so
+/// without a limit a corrupt or hostile peer could make us allocate up to 4 GiB.
+pub const MAX_FRAME_BYTES: usize = 1 << 30;
+
+/// Request/response tuning applied to every peer connection.
+fn tune_stream(stream: &TcpStream) {
+    // Don't let Nagle + delayed ACK stall small packets.
+    let _ = stream.set_nodelay(true);
+    let sock = socket2::SockRef::from(stream);
+    let _ = sock.set_send_buffer_size(SOCKET_BUFFER_BYTES);
+    let _ = sock.set_recv_buffer_size(SOCKET_BUFFER_BYTES);
+}
+
 /// Gives a local IP address for the NetworkLayer
 async fn get_local_ip() -> Result<IpAddr, StruumError> {
     let socket = UdpSocket::bind("0.0.0.0:0")
@@ -85,8 +102,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         let stream = TcpStream::connect(target_addr)
             .await
             .map_err(|e| NetworkConnectionError(format!("Failed to connect to {}: {}", target_addr, e)))?;
-        // Request/response traffic: don't let Nagle + delayed ACK stall small packets.
-        let _ = stream.set_nodelay(true);
+        tune_stream(&stream);
 
         self.connections
             .insert(target_addr, Arc::new(Mutex::new(stream)));
@@ -219,7 +235,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             .accept()
             .await
             .map_err(|e| NetworkConnectionError(format!("Failed to accept TCP connection: {}", e)))?;
-        let _ = stream.set_nodelay(true);
+        tune_stream(&stream);
         log::info!("Accepted TCP connection from {}", peer_addr);
         self.connections
             .insert(peer_addr, Arc::new(Mutex::new(stream)));
@@ -266,6 +282,51 @@ impl PeerConnection {
         Self::read_packet(&mut stream, self.addr).await
     }
 
+    /// Like [`PeerConnection::request`] for a packet whose last field is a byte
+    /// vector (e.g. `WORK`): `header` is the packet with that field left empty, and
+    /// `payload` is written straight after it, so large payloads are never copied
+    /// into a frame. The bytes on the wire are identical to sending the full packet.
+    pub async fn request_with_payload(
+        &self,
+        header: &TcpPacket,
+        payload: &[u8],
+    ) -> Result<TcpPacket, StruumError> {
+        let frame = Self::frame_with_payload(header, payload.len())?;
+        let mut stream = self.stream.lock().await;
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|e| NetworkConnectionError(e.to_string()))?;
+        stream
+            .write_all(payload)
+            .await
+            .map_err(|e| NetworkConnectionError(e.to_string()))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| NetworkConnectionError(e.to_string()))?;
+        log::debug!("Sent TCP packet ({} bytes) to {}", frame.len() - 4 + payload.len(), self.addr);
+        Self::read_packet(&mut stream, self.addr).await
+    }
+
+    /// Length prefix + `header`, with the trailing empty byte field's length set to `payload_len`.
+    pub fn frame_with_payload(header: &TcpPacket, payload_len: usize) -> Result<Vec<u8>, StruumError> {
+        let mut frame = vec![0u8; 4];
+        bincode::serialize_into(&mut frame, header).map_err(|e| NetworkConnectionError(e.to_string()))?;
+        // bincode ends the packet with the empty field's u64 length (0): patch it.
+        let len_at = frame.len() - 8;
+        if frame[len_at..] != [0u8; 8] {
+            return Err(NetworkConnectionError(
+                "header packet must end with an empty byte field".to_string(),
+            ));
+        }
+        frame[len_at..].copy_from_slice(&(payload_len as u64).to_le_bytes());
+        let total = u32::try_from(frame.len() - 4 + payload_len)
+            .map_err(|_| NetworkConnectionError(format!("packet too large: {payload_len} bytes")))?;
+        frame[..4].copy_from_slice(&total.to_be_bytes());
+        Ok(frame)
+    }
+
     async fn write_packet(
         stream: &mut TcpStream,
         addr: SocketAddr,
@@ -296,6 +357,11 @@ impl PeerConnection {
             .await
             .map_err(|e| NetworkConnectionError(format!("Failed to read TCP length header from {}: {}", addr, e)))?;
         let len = u32::from_be_bytes(len_buf) as usize;
+        if len > MAX_FRAME_BYTES {
+            return Err(NetworkConnectionError(format!(
+                "{addr} sent a {len}-byte packet (limit {MAX_FRAME_BYTES})"
+            )));
+        }
 
         let mut payload = vec![0u8; len];
         stream
