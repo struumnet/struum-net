@@ -23,6 +23,25 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   fit for adding devices.
 - Android throttles Wi-Fi when dozing, which causes shard timeouts and reassignment.
 
+- Host-only test setup: `scripts/test.sh` (`STRUUM_TEST_GL=egl` for headless GL), with wire-format, TCP/UDP
+  transport and relay tests.
+- Benchmark: `examples/bench.rs` reports wall time and MB on the wire; `ShardReport` carries
+  `bytes_sent`, `bytes_received`, `bytes_saved`, `round_trip` and `cache_misses`.
+- glfw backend no longer crashes when worker threads exit (glfw is initialised once and never
+  terminated).
+- Live node stats (`Node::stats()`): shards, bytes and busy time served for / used from each peer.
+- LAN speed work, measured with `cargo run --release --example bench` (4 in-process workers,
+  `broadcast` = 5 steps with an 8 MB buffer sent to every shard):
+
+  | Change | broadcast wall | broadcast MB sent |
+  |---|---|---|
+  | Baseline | 4028 ms | 339.7 |
+  | serde_bytes, zero-copy sends, 4 MiB socket buffers | 4031 ms | 339.7 |
+  | No per-thread copies of broadcast buffers in the wasm executor | 1861 ms | 339.7 |
+
+  Localhost hides bandwidth, so MB sent is the number that matters for Wi-Fi workers.
+
 ## Next
 
-- No benchmarks yet; add a proper benchmark setup before publishing performance numbers.
+- Blob cache (`WORKREF` / `CACHEMISS`): send modules and broadcast buffers to each peer once.
+- Pipelining (2 shards in flight per peer) and speculative re-runs of the last shards.
