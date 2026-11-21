@@ -9,6 +9,10 @@ use std::rc::Rc;
 use struum_types::{Buffer, StruumError};
 use struum_kernel::Kernel;
 
+/// A compiled compute shader with its buffers uploaded to the GPU, on the GL context of
+/// the current thread.
+///
+/// Not `Send`: create, run and read it on one thread.
 pub struct OpenglBackend {
     shader: Rc<Shader>,
     gl_buffers: HashMap<String, GlBuffer>,
@@ -16,6 +20,11 @@ pub struct OpenglBackend {
 }
 
 impl OpenglBackend {
+    /// Compiles a complete GLSL compute `shader` and binds `buffers` at binding points
+    /// 0, 1, ... in order. [`execute`](Self::execute) dispatches `group_size` work groups.
+    ///
+    /// # Errors
+    /// If no GL context can be created or the shader fails to compile.
     pub fn new(shader: &str, buffers: &[Buffer], group_size: u32) -> Result<Self, StruumError> {
         GlContext::ensure_current()?;
 
@@ -38,6 +47,10 @@ impl OpenglBackend {
         })
     }
 
+    /// Prepares a packed [`Kernel`] (see [`Kernel::pack`]).
+    ///
+    /// # Errors
+    /// If the kernel is not packed, no GL context can be created or the shader fails to compile.
     pub fn from_kernel(kernel: &Kernel) -> Result<Self, StruumError> {
         GlContext::ensure_current()?;
 
@@ -70,10 +83,12 @@ impl OpenglBackend {
         })
     }
 
+    /// Dispatches the shader and waits until its buffer writes are visible.
     pub fn execute(&self) {
         self.shader.dispatch_and_wait(self.group_size, 1, 1);
     }
 
+    /// Overwrites buffer `buffer_name` on the GPU with `data`.
     pub fn write_buffer<T: bytemuck::Pod>(
         &mut self,
         buffer_name: &str,
@@ -90,6 +105,7 @@ impl OpenglBackend {
         Ok(())
     }
 
+    /// Reads buffer `buffer_name` back from the GPU.
     pub fn read_buffer<T: bytemuck::Pod>(
         &mut self,
         buffer_name: &str,
@@ -104,6 +120,7 @@ impl OpenglBackend {
         Ok(bytemuck::cast_slice(&data).to_vec())
     }
 
+    /// Copies every GPU buffer back into the matching buffer of `kernel`.
     pub fn sync_to_kernel(&self, kernel: &mut Kernel) -> Result<(), StruumError> {
         for (_, gl_buffer) in &self.gl_buffers {
             let data = gl_buffer.read()?;
