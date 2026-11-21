@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinSet;
 
+use crate::stats::NodeStats;
+
 use struum_network::layer::PeerConnection;
 use struum_scheduler::Work;
 use struum_types::network::{NodeBackend, NodeDetails, TcpPacket, UID, WorkKind, WorkPacket};
@@ -98,6 +100,7 @@ pub(crate) async fn run_sharded(
     work: Work,
     peers: Vec<PeerConnection>,
     opts: &ShardOptions,
+    stats: Option<&Arc<NodeStats>>,
 ) -> Result<(Work, ShardReport), StruumError> {
     let started = Instant::now();
     let kind = work.kind();
@@ -154,8 +157,10 @@ pub(crate) async fn run_sharded(
         let expected = expected.clone();
         let opts = opts.clone();
         let job_id = job_id.clone();
+        let stats = stats.cloned();
         set.spawn(async move {
-            peer_loop(peer, sender_id, kind, &job_id, &shared, &payloads, &expected, &opts).await
+            peer_loop(peer, sender_id, kind, &job_id, &shared, &payloads, &expected, &opts, stats.as_deref())
+                .await
         });
     }
 
@@ -233,6 +238,7 @@ async fn peer_loop(
     payloads: &[Arc<ShardPayload>],
     expected: &[usize],
     opts: &ShardOptions,
+    stats: Option<&NodeStats>,
 ) -> Result<(PeerExit, Vec<(usize, SocketAddr, Duration)>), StruumError> {
     let mut done = Vec::new();
     loop {
@@ -263,9 +269,17 @@ async fn peer_loop(
         shared.bytes_sent.fetch_add(payloads[idx].bytes.len() as u64, Ordering::Relaxed);
         let sent_at = Instant::now();
         let reply = tokio::time::timeout(opts.shard_timeout, peer.request_with_payload(&header, &payloads[idx].bytes)).await;
-        if let Ok(Ok(TcpPacket::RESULT(res))) = &reply {
-            shared.bytes_received.fetch_add(res.result_data.len() as u64, Ordering::Relaxed);
-        }
+        let received = match &reply {
+            Ok(Ok(TcpPacket::RESULT(res))) => res.result_data.len() as u64,
+            _ => 0,
+        };
+        shared.bytes_received.fetch_add(received, Ordering::Relaxed);
+        let sent = payloads[idx].bytes.len() as u64;
+        let record = |ok: bool| {
+            if let Some(stats) = stats {
+                stats.used(peer.addr, ok, sent, received, sent_at.elapsed());
+            }
+        };
         let failure = match reply {
             Ok(Ok(TcpPacket::RESULT(res))) => match Work::from_bytes(kind, &res.result_data)
                 .and_then(|mut w| w.restore_elided(&payloads[idx].work).map(|()| w))
@@ -274,6 +288,7 @@ async fn peer_loop(
                     shared.results.lock().await[idx] = Some(work);
                     shared.remaining.fetch_sub(1, Ordering::SeqCst);
                     shared.changed.notify_waiters();
+                    record(true);
                     done.push((idx, peer.addr, sent_at.elapsed()));
                     continue;
                 }
@@ -286,6 +301,7 @@ async fn peer_loop(
                 Err(e) => format!("sent an unreadable result: {e}"),
             },
             Ok(Ok(TcpPacket::WORKERROR(err))) => {
+                record(false);
                 return Err(StruumError::TaskError(format!(
                     "peer {} failed shard {}: {}",
                     peer.addr, idx, err.message
@@ -296,6 +312,7 @@ async fn peer_loop(
             Err(_) => format!("timed out after {:?}", opts.shard_timeout),
         };
 
+        record(false);
         // Peer failure: requeue the shard for someone else and retire this peer.
         let attempts = attempt + 1;
         log::warn!(

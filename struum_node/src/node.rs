@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::mpsc::{self, Receiver};
 
@@ -15,6 +16,7 @@ use struum_types::network::{
 };
 
 use crate::dispatch::{self, ShardOptions, ShardReport};
+use crate::stats::NodeStats;
 
 /// Coordinator component embedded in a `Node`.
 /// Maintains the peer network map independently and provides node selection/lookup logic.
@@ -103,6 +105,8 @@ pub struct Node<const BUF_SIZE: usize> {
     pub coordinator: Coordinator,
     /// Configured relay server address for registration polling.
     pub relay_addr: Option<SocketAddr>,
+    /// Work given to and received from the network; see [`Node::stats`].
+    stats: Arc<NodeStats>,
 }
 
 impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
@@ -157,7 +161,14 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             job_rx,
             coordinator: Coordinator::new(),
             relay_addr: None,
+            stats: Arc::new(NodeStats::default()),
         })
+    }
+
+    /// Live counters of shards this node ran for others and others ran for it.
+    /// The handle stays valid while the node is moved into a serving task.
+    pub fn stats(&self) -> Arc<NodeStats> {
+        self.stats.clone()
     }
 
     // --- Intra-node thread communication methods (via struum_scheduler) ---
@@ -264,7 +275,10 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     ) -> Result<(Work, ShardReport), StruumError> {
         let work = work.into();
         let peers = self.eligible_peers(work.kind());
-        let result = dispatch::run_sharded(self.id, work, peers, opts).await;
+        let result = dispatch::run_sharded(self.id, work, peers, opts, Some(&self.stats)).await;
+        if let Ok((_, report)) = &result {
+            self.stats.job_done(report.retries as u64);
+        }
 
         if let Ok((_, report)) = &result {
             // Forget peers that failed so later jobs skip them.
@@ -301,13 +315,13 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
             // `elide`: WORK results leave out buffers the task did not change (the
             // requester restores them); legacy TASKDATA results are always complete.
-            let (task_id, kind, work, elide) = match packet {
+            let (task_id, kind, work, elide, bytes_in) = match packet {
                 TcpPacket::WORK(WorkPacket { task_id, kind, data, .. }) => {
-                    (task_id, kind, Work::from_bytes(kind, &data), true)
+                    (task_id, kind, Work::from_bytes(kind, &data), true, data.len())
                 }
                 TcpPacket::TASKDATA(TaskDataPacket { task_id, kernel_data, .. }) => {
                     let kind = struum_types::network::WorkKind::Gpu;
-                    (task_id, kind, Work::from_bytes(kind, &kernel_data), false)
+                    (task_id, kind, Work::from_bytes(kind, &kernel_data), false, kernel_data.len())
                 }
                 other => {
                     log::warn!("Node {} ignoring unexpected packet from {}: {:?}", self.id, peer_addr, other);
@@ -317,6 +331,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
             log::info!("Node {} running {:?} task '{}' from {}", self.id, kind, task_id, peer_addr);
             let started = std::time::Instant::now();
+            self.stats.begin_serving();
             let result = match work {
                 Ok(work) => {
                     let original = elide.then(|| work.clone());
@@ -330,12 +345,15 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                 Err(e) => Err(e),
             };
 
+            let busy = started.elapsed();
             let reply = match result.and_then(|w| w.to_bytes()) {
                 Ok(bytes) => {
+                    self.stats.served(peer_addr, true, bytes_in as u64, bytes.len() as u64, busy);
                     log::info!("Node {} finished '{}' in {:?}", self.id, task_id, started.elapsed());
                     TcpPacket::RESULT(ResultPacket::new(task_id, self.id, bytes))
                 }
                 Err(e) => {
+                    self.stats.served(peer_addr, false, bytes_in as u64, 0, busy);
                     log::error!("Node {} failed '{}': {}", self.id, task_id, e);
                     TcpPacket::WORKERROR(WorkErrorPacket {
                         task_id,

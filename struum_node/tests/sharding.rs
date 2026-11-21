@@ -171,3 +171,34 @@ async fn gpu_work_needs_opengl_peers() {
     let err = node.run_sharded(kernel, &ShardOptions::default()).await.unwrap_err().to_string();
     assert!(err.contains("no connected peers"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stats_count_contributions_both_ways() {
+    // A worker whose stats we can read after it served.
+    let mut worker = Node::<2048>::with_id(UID::new(50), 0, 0, NodeBackend::Cpu, 1).await.unwrap();
+    let worker_stats = worker.stats();
+    let details = worker.details();
+    tokio::spawn(async move {
+        loop {
+            let peer = worker.accept_peer_connection().await.expect("accept");
+            worker.serve_peer(peer).await.expect("serve");
+        }
+    });
+    let mut node = requester(&[details]).await;
+
+    let opts = ShardOptions { shards_per_peer: 3, ..ShardOptions::default() };
+    let (_, report) = node.run_sharded_with_report(selftest::task(300), &opts).await.unwrap();
+
+    let mine = node.stats().snapshot();
+    assert_eq!(mine.jobs, 1);
+    assert_eq!(mine.used.shards, 3);
+    assert_eq!(mine.used.bytes_out, report.bytes_sent);
+    assert_eq!(mine.used_by_peer.len(), 1);
+    assert_eq!(mine.served.shards, 0, "the requester ran nothing for others");
+
+    let theirs = worker_stats.snapshot();
+    assert_eq!(theirs.served.shards, 3);
+    assert_eq!(theirs.served.bytes_in, report.bytes_sent);
+    assert_eq!(theirs.served.bytes_out, report.bytes_received);
+    assert!(!theirs.working);
+}
