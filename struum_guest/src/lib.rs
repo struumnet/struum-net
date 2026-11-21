@@ -88,11 +88,15 @@ impl TaskContext {
         self.buffers.len()
     }
 
-    fn raw(&self, index: usize, elem_size: usize) -> RawBuffer {
-        let raw = *self
+    fn buffer(&self, index: usize) -> RawBuffer {
+        *self
             .buffers
             .get(index)
-            .unwrap_or_else(|| panic!("buffer {index} does not exist ({} buffers)", self.buffers.len()));
+            .unwrap_or_else(|| panic!("buffer {index} does not exist ({} buffers)", self.buffers.len()))
+    }
+
+    fn raw(&self, index: usize, elem_size: usize) -> RawBuffer {
+        let raw = self.buffer(index);
         assert!(
             raw.stride as usize == elem_size,
             "buffer {index} has stride {} but was accessed as a {}-byte type",
@@ -100,6 +104,30 @@ impl TaskContext {
             elem_size
         );
         raw
+    }
+
+    /// Bytes per element of buffer `index`.
+    pub fn stride(&self, index: usize) -> usize {
+        self.buffer(index).stride as usize
+    }
+
+    /// Buffer `index` as rows of `T` (for buffers created with `Buffer::from_rows`,
+    /// e.g. one image per work item). Row `i` belongs to work item `offset() + i`.
+    pub fn rows<T: bytemuck::Pod>(&self, index: usize) -> std::slice::ChunksExact<'_, T> {
+        assert!(
+            self.borrowed.get() & (1 << index) == 0,
+            "buffer {index} is already borrowed as output"
+        );
+        let raw = self.buffer(index);
+        let size = std::mem::size_of::<T>();
+        assert!(
+            raw.stride > 0 && (raw.stride as usize).is_multiple_of(size),
+            "buffer {index} has stride {} which is not a whole number of {size}-byte values",
+            raw.stride
+        );
+        let bytes = unsafe { std::slice::from_raw_parts(raw.ptr as *const u8, raw.byte_len as usize) };
+        let values: &[T] = bytemuck::cast_slice(bytes);
+        values.chunks_exact(raw.stride as usize / size)
     }
 
     /// Read-only view of buffer `index`.

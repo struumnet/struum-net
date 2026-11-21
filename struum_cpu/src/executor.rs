@@ -202,8 +202,8 @@ impl Drop for CpuExecutor {
 mod tests {
     use super::*;
 
-
     use crate::selftest::{expected, task_with_entry as task};
+    use struum_types::Buffer;
 
     #[test]
     fn runs_single_threaded() {
@@ -230,6 +230,26 @@ mod tests {
             .collect();
         let out = CpuTask::merge(parts).unwrap();
         assert_eq!(out.get_buffer("y").unwrap().as_slice::<f32>(), expected(500).as_slice());
+    }
+
+    #[test]
+    fn sum_buffers_reduce_across_threads_and_shards() {
+        let mut t = task("sum", 1001);
+        t.add_buffer(Buffer::new("acc", &[0.0f32, 0.0]));
+        t.set_shard_mode("acc", struum_types::ShardMode::SumF32).unwrap();
+        let want = [(0..1001).sum::<usize>() as f32, 1001.0];
+
+        let single = CpuExecutor::with_options(1, Duration::from_secs(10)).unwrap();
+        let out = single.execute(t.clone()).unwrap();
+        assert_eq!(out.get_buffer("acc").unwrap().as_slice::<f32>(), &want);
+
+        let multi = CpuExecutor::with_options(4, Duration::from_secs(10)).unwrap();
+        let parts = split_ranges(1001, 3)
+            .into_iter()
+            .map(|r| multi.execute(t.shard(r).unwrap()).unwrap())
+            .collect();
+        let out = CpuTask::merge(parts).unwrap();
+        assert_eq!(out.get_buffer("acc").unwrap().as_slice::<f32>(), &want);
     }
 
     #[test]

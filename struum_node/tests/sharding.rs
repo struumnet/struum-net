@@ -92,6 +92,14 @@ async fn cpu_task_is_sharded_across_workers() {
     assert_eq!(report.shards, 6);
     assert_eq!(report.completed_by.values().sum::<usize>(), 6);
     assert!(report.completed_by.len() >= 2, "work should spread: {:?}", report.completed_by);
+    // Per-shard bookkeeping: contiguous ranges covering 0..n, each with the peer that did it.
+    assert_eq!(report.ranges.len(), 6);
+    assert_eq!(report.ranges.first().unwrap().start, 0);
+    assert_eq!(report.ranges.last().unwrap().end, n);
+    assert_eq!(report.completed_on.len(), 6);
+    for addr in &report.completed_on {
+        assert!(report.completed_by.contains_key(addr));
+    }
     assert!(report.retired.is_empty());
 }
 

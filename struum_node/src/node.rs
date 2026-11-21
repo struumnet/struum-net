@@ -299,13 +299,15 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                 }
             };
 
-            let (task_id, kind, work) = match packet {
+            // `elide`: WORK results leave out buffers the task did not change (the
+            // requester restores them); legacy TASKDATA results are always complete.
+            let (task_id, kind, work, elide) = match packet {
                 TcpPacket::WORK(WorkPacket { task_id, kind, data, .. }) => {
-                    (task_id, kind, Work::from_bytes(kind, &data))
+                    (task_id, kind, Work::from_bytes(kind, &data), true)
                 }
                 TcpPacket::TASKDATA(TaskDataPacket { task_id, kernel_data, .. }) => {
                     let kind = struum_types::network::WorkKind::Gpu;
-                    (task_id, kind, Work::from_bytes(kind, &kernel_data))
+                    (task_id, kind, Work::from_bytes(kind, &kernel_data), false)
                 }
                 other => {
                     log::warn!("Node {} ignoring unexpected packet from {}: {:?}", self.id, peer_addr, other);
@@ -316,7 +318,15 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             log::info!("Node {} running {:?} task '{}' from {}", self.id, kind, task_id, peer_addr);
             let started = std::time::Instant::now();
             let result = match work {
-                Ok(work) => self.execute_local(work).await,
+                Ok(work) => {
+                    let original = elide.then(|| work.clone());
+                    self.execute_local(work).await.map(|mut done| {
+                        if let Some(original) = &original {
+                            done.elide_unchanged(original);
+                        }
+                        done
+                    })
+                }
                 Err(e) => Err(e),
             };
 

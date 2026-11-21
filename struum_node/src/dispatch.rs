@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -53,6 +54,10 @@ pub struct ShardReport {
     pub retired: Vec<SocketAddr>,
     /// Number of shard reassignments.
     pub retries: usize,
+    /// Work range of each shard, in order.
+    pub ranges: Vec<Range<usize>>,
+    /// Peer that completed each shard (same order as `ranges`).
+    pub completed_on: Vec<SocketAddr>,
     pub elapsed: Duration,
 }
 
@@ -101,10 +106,15 @@ pub(crate) async fn run_sharded(
 
     let ranges = split_ranges(count, peers.len() * opts.shards_per_peer.max(1));
     let expected: Vec<usize> = ranges.iter().map(|r| r.len()).collect();
-    let payloads: Vec<Arc<Vec<u8>>> = ranges
+    // Keep each shard's request: results leave out unchanged buffers, restored from it.
+    let payloads: Vec<Arc<ShardPayload>> = ranges
         .iter()
-        .map(|r| work.shard(r.clone()).and_then(|s| s.to_bytes()).map(Arc::new))
-        .collect::<Result<_, _>>()?;
+        .map(|r| {
+            let work = work.shard(r.clone())?;
+            let bytes = work.to_bytes()?;
+            Ok(Arc::new(ShardPayload { work, bytes }))
+        })
+        .collect::<Result<_, StruumError>>()?;
     drop(work);
 
     let shards = payloads.len();
@@ -139,15 +149,17 @@ pub(crate) async fn run_sharded(
         });
     }
 
-    let mut report = ShardReport { shards, ..Default::default() };
+    let mut report = ShardReport { shards, ranges, ..Default::default() };
+    let mut completed_on: Vec<Option<SocketAddr>> = vec![None; shards];
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok(Ok((exit, done))) => {
                 if let PeerExit::Retired(addr) = exit {
                     report.retired.push(addr);
                 }
-                for addr in done {
+                for (idx, addr) in done {
                     *report.completed_by.entry(addr).or_default() += 1;
+                    completed_on[idx] = Some(addr);
                 }
             }
             Ok(Err(e)) => {
@@ -175,6 +187,7 @@ pub(crate) async fn run_sharded(
         .collect();
     let merged = Work::merge(parts)?;
 
+    report.completed_on = completed_on.into_iter().map(|a| a.expect("all shards completed")).collect();
     report.retries = shared.retries.load(Ordering::SeqCst);
     report.elapsed = started.elapsed();
     log::info!(
@@ -189,16 +202,23 @@ pub(crate) async fn run_sharded(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One shard as sent to peers, plus the request itself for restoring elided buffers.
+struct ShardPayload {
+    work: Work,
+    bytes: Vec<u8>,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn peer_loop(
     peer: PeerConnection,
     sender_id: UID,
     kind: WorkKind,
     job_id: &str,
     shared: &Shared,
-    payloads: &[Arc<Vec<u8>>],
+    payloads: &[Arc<ShardPayload>],
     expected: &[usize],
     opts: &ShardOptions,
-) -> Result<(PeerExit, Vec<SocketAddr>), StruumError> {
+) -> Result<(PeerExit, Vec<(usize, SocketAddr)>), StruumError> {
     let mut done = Vec::new();
     loop {
         // Register for wakeups before checking state so no notification is missed.
@@ -220,17 +240,19 @@ async fn peer_loop(
             task_id: format!("{job_id}/{idx}"),
             sender_id,
             kind,
-            data: payloads[idx].as_ref().clone(),
+            data: payloads[idx].bytes.clone(),
         });
         log::debug!("Shard {} (attempt {}) -> {}", idx, attempt + 1, peer.addr);
 
         let failure = match tokio::time::timeout(opts.shard_timeout, peer.request(&packet)).await {
-            Ok(Ok(TcpPacket::RESULT(res))) => match Work::from_bytes(kind, &res.result_data) {
+            Ok(Ok(TcpPacket::RESULT(res))) => match Work::from_bytes(kind, &res.result_data)
+                .and_then(|mut w| w.restore_elided(&payloads[idx].work).map(|()| w))
+            {
                 Ok(work) if work.work_count() == expected[idx] => {
                     shared.results.lock().await[idx] = Some(work);
                     shared.remaining.fetch_sub(1, Ordering::SeqCst);
                     shared.changed.notify_waiters();
-                    done.push(peer.addr);
+                    done.push((idx, peer.addr));
                     continue;
                 }
                 Ok(work) => format!(
