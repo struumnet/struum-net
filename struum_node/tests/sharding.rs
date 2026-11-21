@@ -101,6 +101,11 @@ async fn cpu_task_is_sharded_across_workers() {
         assert!(report.completed_by.contains_key(addr));
     }
     assert!(report.retired.is_empty());
+    // Transfer accounting: inputs and outputs both cross the wire.
+    assert_eq!(report.round_trip.len(), 6);
+    assert!(report.round_trip.iter().all(|d| !d.is_zero()));
+    assert!(report.bytes_sent >= (n * 8) as u64, "{}", report.bytes_sent);
+    assert!(report.bytes_received >= (n * 4) as u64, "{}", report.bytes_received);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify};
@@ -58,6 +58,12 @@ pub struct ShardReport {
     pub ranges: Vec<Range<usize>>,
     /// Peer that completed each shard (same order as `ranges`).
     pub completed_on: Vec<SocketAddr>,
+    /// Request-to-result time of the successful attempt of each shard (same order as `ranges`).
+    pub round_trip: Vec<Duration>,
+    /// Payload bytes sent to peers, including attempts that failed.
+    pub bytes_sent: u64,
+    /// Result payload bytes received from peers.
+    pub bytes_received: u64,
     pub elapsed: Duration,
 }
 
@@ -74,6 +80,8 @@ struct Shared {
     results: Mutex<Vec<Option<Work>>>,
     remaining: AtomicUsize,
     retries: AtomicUsize,
+    bytes_sent: AtomicU64,
+    bytes_received: AtomicU64,
     /// Signalled when a shard completes or is requeued, waking idle peers.
     changed: Notify,
 }
@@ -131,6 +139,8 @@ pub(crate) async fn run_sharded(
         results: Mutex::new((0..shards).map(|_| None).collect()),
         remaining: AtomicUsize::new(shards),
         retries: AtomicUsize::new(0),
+        bytes_sent: AtomicU64::new(0),
+        bytes_received: AtomicU64::new(0),
         changed: Notify::new(),
     });
     let payloads = Arc::new(payloads);
@@ -151,15 +161,17 @@ pub(crate) async fn run_sharded(
 
     let mut report = ShardReport { shards, ranges, ..Default::default() };
     let mut completed_on: Vec<Option<SocketAddr>> = vec![None; shards];
+    let mut round_trip = vec![Duration::ZERO; shards];
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok(Ok((exit, done))) => {
                 if let PeerExit::Retired(addr) = exit {
                     report.retired.push(addr);
                 }
-                for (idx, addr) in done {
+                for (idx, addr, rtt) in done {
                     *report.completed_by.entry(addr).or_default() += 1;
                     completed_on[idx] = Some(addr);
+                    round_trip[idx] = rtt;
                 }
             }
             Ok(Err(e)) => {
@@ -188,7 +200,10 @@ pub(crate) async fn run_sharded(
     let merged = Work::merge(parts)?;
 
     report.completed_on = completed_on.into_iter().map(|a| a.expect("all shards completed")).collect();
+    report.round_trip = round_trip;
     report.retries = shared.retries.load(Ordering::SeqCst);
+    report.bytes_sent = shared.bytes_sent.load(Ordering::SeqCst);
+    report.bytes_received = shared.bytes_received.load(Ordering::SeqCst);
     report.elapsed = started.elapsed();
     log::info!(
         "Sharded job finished in {:?}: {} shard(s), {} retr{}, per peer {:?}",
@@ -218,7 +233,7 @@ async fn peer_loop(
     payloads: &[Arc<ShardPayload>],
     expected: &[usize],
     opts: &ShardOptions,
-) -> Result<(PeerExit, Vec<(usize, SocketAddr)>), StruumError> {
+) -> Result<(PeerExit, Vec<(usize, SocketAddr, Duration)>), StruumError> {
     let mut done = Vec::new();
     loop {
         // Register for wakeups before checking state so no notification is missed.
@@ -244,7 +259,13 @@ async fn peer_loop(
         });
         log::debug!("Shard {} (attempt {}) -> {}", idx, attempt + 1, peer.addr);
 
-        let failure = match tokio::time::timeout(opts.shard_timeout, peer.request(&packet)).await {
+        shared.bytes_sent.fetch_add(payloads[idx].bytes.len() as u64, Ordering::Relaxed);
+        let sent_at = Instant::now();
+        let reply = tokio::time::timeout(opts.shard_timeout, peer.request(&packet)).await;
+        if let Ok(Ok(TcpPacket::RESULT(res))) = &reply {
+            shared.bytes_received.fetch_add(res.result_data.len() as u64, Ordering::Relaxed);
+        }
+        let failure = match reply {
             Ok(Ok(TcpPacket::RESULT(res))) => match Work::from_bytes(kind, &res.result_data)
                 .and_then(|mut w| w.restore_elided(&payloads[idx].work).map(|()| w))
             {
@@ -252,7 +273,7 @@ async fn peer_loop(
                     shared.results.lock().await[idx] = Some(work);
                     shared.remaining.fetch_sub(1, Ordering::SeqCst);
                     shared.changed.notify_waiters();
-                    done.push((idx, peer.addr));
+                    done.push((idx, peer.addr, sent_at.elapsed()));
                     continue;
                 }
                 Ok(work) => format!(
