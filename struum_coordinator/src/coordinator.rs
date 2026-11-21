@@ -12,6 +12,7 @@ use struum_types::{
 /// Because `Node` maintains its own independent network map and coordination methods,
 /// `Coordinator` provides a high-level coordination interface atop `Node`.
 pub struct Coordinator<const BUF_SIZE: usize> {
+    /// The node doing the actual networking; also reachable through `Deref`.
     pub node: Node<BUF_SIZE>,
 }
 

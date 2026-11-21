@@ -1,3 +1,19 @@
+//! Relay server for peer discovery.
+//!
+//! Nodes send an [`IntroductionPacket`] to the relay over UDP. The relay records the node in
+//! its registry and introduces it to every node already registered, in both directions,
+//! so the nodes can then open TCP connections to each other. If a node reports an
+//! unspecified IP (`0.0.0.0`), the relay uses the packet's source address.
+//!
+//! Run it with `cargo run -p struum_relay`, or embed a [`RelayServer`]:
+//!
+//! ```no_run
+//! # async fn run() -> Result<(), struum_types::StruumError> {
+//! let mut relay = struum_relay::RelayServer::<1024>::new(39001, 39002).await?;
+//! relay.run().await
+//! # }
+//! ```
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use struum_network::layer::NetworkLayer;
@@ -9,8 +25,11 @@ use struum_types::network::{IntroductionPacket, NodeDetails, UID, UdpPacket};
 /// The relay records the node and relays the newly registered IP to all existing nodes,
 /// as well as relaying all existing nodes' IPs to the new node.
 pub struct RelayServer<const BUF_SIZE: usize> {
+    /// The relay's own identifier.
     pub id: UID,
+    /// Sockets the relay listens and sends on.
     pub net: NetworkLayer<BUF_SIZE>,
+    /// Every node that has registered, by id.
     pub registered_nodes: HashMap<UID, NodeDetails>,
 }
 
