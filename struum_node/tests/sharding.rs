@@ -11,7 +11,7 @@ use struum_types::Buffer;
 use struum_types::network::{NodeBackend, NodeDetails, NodeRole, UID};
 
 /// A real worker: serves every requester that connects.
-async fn spawn_worker(id: u8) -> NodeDetails {
+async fn spawn_worker(id: u64) -> NodeDetails {
     let mut node = Node::<2048>::with_id(UID::new(id), 0, 0, NodeBackend::Cpu, 1)
         .await
         .expect("worker node");
@@ -34,7 +34,7 @@ enum Faulty {
 }
 
 /// A misbehaving worker that only speaks raw TCP.
-async fn spawn_faulty(id: u8, mode: Faulty) -> NodeDetails {
+async fn spawn_faulty(id: u64, mode: Faulty) -> NodeDetails {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {

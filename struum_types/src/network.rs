@@ -164,10 +164,12 @@ impl NodeDetails {
     }
 }
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-static NEXT_UID: AtomicU8 = AtomicU8::new(1);
+static NEXT_UID: AtomicU64 = AtomicU64::new(1);
 
+/// Node identifier. 64-bit and randomly generated, so independently started
+/// nodes practically never collide.
 #[derive(
     Default,
     Deserialize,
@@ -180,47 +182,51 @@ static NEXT_UID: AtomicU8 = AtomicU8::new(1);
     Copy,
 )]
 pub struct UID {
-    pub inner: u8,
+    pub inner: u64,
 }
 
 impl UID {
-    pub fn new(inner: u8) -> UID {
+    pub fn new(inner: u64) -> UID {
         UID { inner }
     }
 
-    /// Automatically generates a new unique UID across threads and processes.
+    /// Generates a random, non-zero UID. Uses the process-random `RandomState`
+    /// keys mixed with time, pid and a counter, so no extra RNG dependency is needed.
     pub fn generate() -> UID {
+        use std::hash::{BuildHasher, Hasher};
         use std::time::{SystemTime, UNIX_EPOCH};
-        let pid = std::process::id();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let seed = (pid.wrapping_mul(31) ^ nanos) as u8;
-        let count = NEXT_UID.fetch_add(1, Ordering::Relaxed);
-        let val = seed.wrapping_add(count);
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        h.write_u32(std::process::id());
+        h.write_u64(NEXT_UID.fetch_add(1, Ordering::Relaxed));
+        let val = h.finish();
         UID { inner: if val == 0 { 1 } else { val } }
     }
 
-    pub fn id(&self) -> u8 {
+    pub fn id(&self) -> u64 {
         self.inner
     }
 }
 
-impl From<u8> for UID {
-    fn from(inner: u8) -> Self {
+impl From<u64> for UID {
+    fn from(inner: u64) -> Self {
         UID { inner }
     }
 }
 
-impl From<UID> for u8 {
+impl From<UID> for u64 {
     fn from(uid: UID) -> Self {
         uid.inner
     }
 }
 
 impl std::ops::Deref for UID {
-    type Target = u8;
+    type Target = u64;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -270,4 +276,17 @@ pub trait NetworkCoordinator {
 
     /// Initiates information exchange between registered nodes.
     async fn establish_information_exchange(&mut self) -> Result<(), StruumError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UID;
+    use std::collections::HashSet;
+
+    #[test]
+    fn generated_uids_are_unique_and_non_zero() {
+        let ids: HashSet<UID> = (0..10_000).map(|_| UID::generate()).collect();
+        assert_eq!(ids.len(), 10_000);
+        assert!(!ids.contains(&UID::new(0)));
+    }
 }
