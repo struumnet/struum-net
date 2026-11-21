@@ -8,3 +8,6 @@ serde = { workspace = true }
 serde_derive = { workspace = true }
 bytemuck = { workspace = true }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+bincode = { workspace = true }

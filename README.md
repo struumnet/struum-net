@@ -93,5 +93,9 @@ Set `RELAY_ADDR=<pc-lan-ip>:39001` on requesters when workers are on other devic
 ## Tests
 
 ```bash
-cargo test --all
+scripts/test.sh                    # whole workspace, host target only
+scripts/test.sh -p struum_network  # one crate
 ```
+
+GL tests run on the headless EGL backend; the glfw backend segfaults intermittently
+under the parallel test runner (see `scripts/test.sh`).

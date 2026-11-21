@@ -9,3 +9,6 @@ struum_types = { workspace = true }
 serde = "1.0.229"
 bincode = "1.3.3"
 log = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
