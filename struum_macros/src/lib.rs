@@ -1,7 +1,32 @@
+//! Procedural macros for struum.
+//!
+//! [`macro@gpu_type`] turns a plain Rust struct into a GPU buffer element: `#[repr(C)]`,
+//! `Pod`, and a `GPUType` impl that emits the matching GLSL struct.
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{ItemStruct, parse_macro_input};
 
+/// Makes a struct usable as a GPU buffer element.
+///
+/// Adds `#[repr(C)]` and derives `Clone`, `Copy`, `bytemuck::Pod` and `bytemuck::Zeroable`,
+/// then implements [`GPUType`](../struum_types/gpu_type/trait.GPUType.html) so the struct is
+/// declared in the generated GLSL with the same name and fields. Every field must itself
+/// be a `GPUType` (e.g. `f32`, `u32`, `i32`), and the crate using it must depend on
+/// `bytemuck` and `struum_types`.
+///
+/// Keep the layout compatible with GLSL `std430`: prefer fields of 4-byte scalars.
+///
+/// ```ignore
+/// use struum_macros::gpu_type;
+///
+/// #[gpu_type]
+/// struct Vec2 {
+///     x: f32,
+///     y: f32,
+/// }
+/// // In GLSL: struct Vec2 { float x; float y; };
+/// ```
 #[proc_macro_attribute]
 pub fn gpu_type(_attr: TokenStream, input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as ItemStruct);
