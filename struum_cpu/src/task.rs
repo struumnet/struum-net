@@ -48,10 +48,12 @@ impl CpuTask {
         Ok(())
     }
 
+    /// The buffer called `name`.
     pub fn get_buffer(&self, name: &str) -> Option<&Buffer> {
         self.buffers.iter().find(|b| b.buffer.name == name).map(|b| &b.buffer)
     }
 
+    /// The WebAssembly module (binary or WAT text).
     pub fn module(&self) -> &[u8] {
         &self.module
     }
@@ -61,6 +63,7 @@ impl CpuTask {
         &mut self.module
     }
 
+    /// Name of the exported function to call.
     pub fn entry(&self) -> &str {
         &self.entry
     }
@@ -70,6 +73,7 @@ impl CpuTask {
         &self.buffers
     }
 
+    /// All buffers, in the order the guest sees them, mutably.
     pub fn buffers_mut(&mut self) -> &mut [BoundBuffer] {
         &mut self.buffers
     }

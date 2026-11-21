@@ -40,6 +40,7 @@ impl CpuExecutor {
         Self::with_options(threads, Duration::from_secs(300))
     }
 
+    /// Uses `threads` OS threads per task and interrupts tasks running longer than `timeout`.
     pub fn with_options(threads: usize, timeout: Duration) -> Result<Self, StruumError> {
         let mut config = Config::new();
         config.epoch_interruption(true);
