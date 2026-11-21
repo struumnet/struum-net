@@ -56,6 +56,7 @@ pub struct WorkPacket {
     pub task_id: String,
     pub sender_id: UID,
     pub kind: WorkKind,
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
@@ -97,6 +98,7 @@ pub struct TaskDataPacket {
     /// ID of the node that sent this task.
     pub sender_id: UID,
     /// Serialized kernel data (bincode-encoded Kernel struct).
+    #[serde(with = "serde_bytes")]
     pub kernel_data: Vec<u8>,
 }
 
@@ -113,6 +115,7 @@ pub struct ResultPacket {
     /// ID of the node that computed the result.
     pub sender_id: UID,
     /// Serialized result data.
+    #[serde(with = "serde_bytes")]
     pub result_data: Vec<u8>,
 }
 

@@ -6,6 +6,8 @@ use crate::StruumError;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Buffer {
     pub name: String,
+    /// Raw bytes: encoded in one block rather than element by element.
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
     pub stride: usize,
 }

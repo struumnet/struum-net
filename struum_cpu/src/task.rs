@@ -7,6 +7,7 @@ use struum_types::{BoundBuffer, Buffer, ShardMode, Shardable, StruumError};
 /// A CPU task: a WebAssembly module, the entry point to call, and its buffers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuTask {
+    #[serde(with = "serde_bytes")]
     module: Vec<u8>,
     entry: String,
     buffers: Vec<BoundBuffer>,

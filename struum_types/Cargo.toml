@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 serde = { workspace = true }
 serde_derive = { workspace = true }
+serde_bytes = { workspace = true }
 bytemuck = { workspace = true }
 async-trait = { workspace = true }
 

@@ -128,3 +128,19 @@ fn errors_display_their_kind_and_message() {
     let boxed: Box<dyn std::error::Error> = Box::new(StruumError::ShardError("x".into()));
     assert_eq!(boxed.to_string(), "Shard Error: x");
 }
+
+/// What `Buffer` looked like before `serde_bytes`: bytes encoded one by one.
+#[derive(serde_derive::Serialize)]
+struct PlainBuffer {
+    name: String,
+    data: Vec<u8>,
+    stride: usize,
+}
+
+#[test]
+fn byte_fields_keep_the_same_encoding() {
+    let data: Vec<u8> = (0..=255).collect();
+    let buf = Buffer { name: "x".into(), data: data.clone(), stride: 4 };
+    let plain = PlainBuffer { name: "x".into(), data, stride: 4 };
+    assert_eq!(bincode::serialize(&buf).unwrap(), bincode::serialize(&plain).unwrap());
+}
