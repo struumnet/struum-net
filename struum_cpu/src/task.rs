@@ -56,6 +56,11 @@ impl CpuTask {
         &self.module
     }
 
+    /// Mutable access to the module bytes (used to send cached modules by reference).
+    pub fn module_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.module
+    }
+
     pub fn entry(&self) -> &str {
         &self.entry
     }
@@ -77,6 +82,23 @@ impl CpuTask {
         self.get_buffer(name)
             .map(|b| b.actual_len())
             .ok_or_else(|| StruumError::NotFound(format!("Work buffer '{}' not found", name)))
+    }
+
+    /// How each buffer is distributed when this task is split into `work_count`
+    /// pieces (work buffer always `Split`), like [`CpuTask::shard`] decides, without
+    /// cloning any buffer data.
+    pub(crate) fn resolved_modes(&self) -> Vec<ShardMode> {
+        let count = self.work_count();
+        self.buffers
+            .iter()
+            .map(|b| {
+                if self.work_buffer.as_deref() == Some(b.buffer.name.as_str()) {
+                    ShardMode::Split
+                } else {
+                    b.resolved_mode(count)
+                }
+            })
+            .collect()
     }
 
     /// Buffers with the work buffer pinned to `Split`.
