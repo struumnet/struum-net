@@ -9,6 +9,9 @@ use crate::job::{JobId, Job};
 use crate::work::Work;
 use crate::worker::worker;
 
+/// Queue of local jobs served by a pool of worker tasks.
+///
+/// Cloning shares the same queue and workers.
 #[derive(Clone)]
 pub struct JobScheduler {
     state: Arc<Mutex<SchedulerState>>,
@@ -17,6 +20,9 @@ pub struct JobScheduler {
 }
 
 impl JobScheduler {
+    /// Spawns `workers` worker tasks on the current tokio runtime. Each finished job's id
+    /// is sent on `tx`, after which its result can be taken with
+    /// [`JobScheduler::get_work_result`].
     pub fn new(tx: Sender<JobId>, workers: u32) -> Self {
         let state = Arc::new(
             Mutex::new(SchedulerState {
@@ -72,7 +78,8 @@ impl JobScheduler {
         }
     }
 
-    /// Result of a finished job: `Some(Ok(work))`, `Some(Err(message))`, or `None` if unknown.
+    /// Takes the result of a finished job: `Some(Ok(work))`, `Some(Err(message))`, or `None`
+    /// if the id is unknown, unfinished or already taken.
     pub async fn get_work_result(&self, id: &JobId) -> Option<Result<Work, String>> {
         let mut state = self.state.lock().await;
         state.results.remove(id)

@@ -2,6 +2,7 @@ use uuid::Uuid;
 
 use crate::work::Work;
 
+/// Identifier of a local job (a UUID string).
 pub type JobId = String;
 
 pub(crate) struct Job {
