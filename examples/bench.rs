@@ -11,7 +11,8 @@
 //!                iterations, the traffic pattern of data-parallel training (MNIST).
 //!
 //! Env: SCENARIO (all|split|broadcast), PEERS (4), ITEMS (1_000_000), WEIGHTS_MB (8),
-//!      STEPS (5), SHARDS_PER_PEER (2), BENCH_JSON (path), RELAY_ADDR, MIN_PEERS
+//!      STEPS (5), SHARDS_PER_PEER (2), BLOB_CACHE (1; 0 sends every blob in full),
+//!      BENCH_JSON (path), RELAY_ADDR, MIN_PEERS
 //!
 //! `cargo run --release --example bench`
 
@@ -51,6 +52,7 @@ struct Row {
     wall: Duration,
     sent: u64,
     received: u64,
+    saved: u64,
     shards: usize,
     retries: usize,
 }
@@ -58,13 +60,14 @@ struct Row {
 impl Row {
     fn print(&self) {
         println!(
-            "{:<10} {:>5} {:>5} {:>10.1} {:>10.2} {:>10.2} {:>7} {:>7}",
+            "{:<10} {:>5} {:>5} {:>10.1} {:>10.2} {:>10.2} {:>10.2} {:>7} {:>7}",
             self.scenario,
             self.peers,
             self.steps,
             self.wall.as_secs_f64() * 1e3,
             self.sent as f64 / 1e6,
             self.received as f64 / 1e6,
+            self.saved as f64 / 1e6,
             self.shards,
             self.retries
         );
@@ -72,13 +75,14 @@ impl Row {
 
     fn json(&self) -> String {
         format!(
-            r#"{{"scenario":"{}","peers":{},"steps":{},"wall_ms":{:.3},"mb_sent":{:.4},"mb_received":{:.4},"shards":{},"retries":{}}}"#,
+            r#"{{"scenario":"{}","peers":{},"steps":{},"wall_ms":{:.3},"mb_sent":{:.4},"mb_received":{:.4},"mb_saved":{:.4},"shards":{},"retries":{}}}"#,
             self.scenario,
             self.peers,
             self.steps,
             self.wall.as_secs_f64() * 1e3,
             self.sent as f64 / 1e6,
             self.received as f64 / 1e6,
+            self.saved as f64 / 1e6,
             self.shards,
             self.retries
         )
@@ -110,6 +114,7 @@ async fn run(
         wall: Duration::ZERO,
         sent: 0,
         received: 0,
+        saved: 0,
         shards: 0,
         retries: 0,
     };
@@ -123,6 +128,7 @@ async fn run(
         assert_eq!(out.get_buffer("y").unwrap().as_slice::<f32>(), expected.as_slice());
         row.sent += report.bytes_sent;
         row.received += report.bytes_received;
+        row.saved += report.bytes_saved;
         row.shards += report.shards;
         row.retries += report.retries;
     }
@@ -139,6 +145,7 @@ async fn main() -> Result<(), StruumError> {
     let steps: usize = env_or("STEPS", 5);
     let opts = ShardOptions {
         shards_per_peer: env_or("SHARDS_PER_PEER", 2),
+        blob_cache: env_or("BLOB_CACHE", 1u8) != 0,
         ..ShardOptions::default()
     };
 
@@ -163,8 +170,8 @@ async fn main() -> Result<(), StruumError> {
     assert!(!connected.is_empty(), "no workers connected");
 
     println!(
-        "{:<10} {:>5} {:>5} {:>10} {:>10} {:>10} {:>7} {:>7}",
-        "scenario", "peers", "steps", "wall ms", "MB sent", "MB recv", "shards", "retries"
+        "{:<10} {:>5} {:>5} {:>10} {:>10} {:>10} {:>10} {:>7} {:>7}",
+        "scenario", "peers", "steps", "wall ms", "MB sent", "MB recv", "MB saved", "shards", "retries"
     );
     let mut rows = Vec::new();
     if scenario == "all" || scenario == "split" {

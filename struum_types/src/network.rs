@@ -38,6 +38,41 @@ pub enum TcpPacket {
     // New variants are appended so existing bincode tags stay stable.
     WORK(WorkPacket),
     WORKERROR(WorkErrorPacket),
+    /// Like `WORK`, with large blobs the peer already holds sent as [`BlobRef`]s.
+    WORKREF(WorkRefPacket),
+    /// Reply to `WORKREF` when the peer no longer holds some referenced blobs.
+    CACHEMISS(CacheMissPacket),
+}
+
+/// Content hash of a blob (xxh3-64 of its bytes).
+pub type BlobHash = u64;
+
+/// A large blob of a [`WorkRefPacket`]'s work left out because the peer
+/// already holds it: `slot` says where it goes (see `struum_scheduler::Work`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobRef {
+    pub slot: u32,
+    pub hash: BlobHash,
+}
+
+/// Work whose referenced blobs are left empty in `data`. Answered like `WORK`,
+/// or with `CACHEMISS` listing blobs the peer must be sent again.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorkRefPacket {
+    pub task_id: String,
+    pub sender_id: UID,
+    pub kind: WorkKind,
+    pub refs: Vec<BlobRef>,
+    /// Kept last so it can be streamed straight after the header.
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,
+}
+
+/// The receiver of a `WORKREF` does not hold these blobs; nothing was run.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CacheMissPacket {
+    pub task_id: String,
+    pub missing: Vec<BlobHash>,
 }
 
 /// Kind of work carried by a [`WorkPacket`].

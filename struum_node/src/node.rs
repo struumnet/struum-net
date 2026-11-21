@@ -7,12 +7,12 @@ use tokio::sync::mpsc::{self, Receiver};
 use struum_kernel::Kernel;
 use struum_network::layer::NetworkLayer;
 use struum_network::layer::PeerConnection;
-use struum_scheduler::{JobId, JobScheduler, Work};
+use struum_scheduler::{BlobStore, JobId, JobScheduler, Work};
 use struum_types::StruumError;
 use struum_types::network::{
     HelloPacket, IntroductionPacket, NetworkCommunicator, NetworkCoordinator, NodeBackend,
     NodeDetails, NodeRole, ResultPacket, TaskDataPacket, TaskPacket, TcpPacket, UID, UdpPacket,
-    WorkErrorPacket, WorkPacket,
+    WorkErrorPacket, WorkPacket, WorkRefPacket, CacheMissPacket,
 };
 
 use crate::dispatch::{self, ShardOptions, ShardReport};
@@ -107,6 +107,9 @@ pub struct Node<const BUF_SIZE: usize> {
     pub relay_addr: Option<SocketAddr>,
     /// Work given to and received from the network; see [`Node::stats`].
     stats: Arc<NodeStats>,
+    /// Bytes of blobs kept per requester connection when serving (see
+    /// `TcpPacket::WORKREF`). Defaults to `STRUUM_BLOB_CACHE_MB` (1024 MiB).
+    pub blob_cache_bytes: usize,
 }
 
 impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
@@ -162,6 +165,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             coordinator: Coordinator::new(),
             relay_addr: None,
             stats: Arc::new(NodeStats::default()),
+            blob_cache_bytes: BlobStore::env_limit_bytes(),
         })
     }
 
@@ -303,6 +307,8 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
     /// `TASKDATA`) packet it sends and replies with `RESULT` or `WORKERROR`.
     /// Returns when the requester disconnects.
     pub async fn serve_peer(&mut self, peer_addr: SocketAddr) -> Result<(), StruumError> {
+        // Blobs this requester sent us, so later `WORKREF`s can leave them out.
+        let mut blobs = BlobStore::new(self.blob_cache_bytes);
         loop {
             let packet = match self.recv_tcp_packet(&peer_addr).await {
                 Ok(p) => p,
@@ -317,7 +323,28 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             // requester restores them); legacy TASKDATA results are always complete.
             let (task_id, kind, work, elide, bytes_in) = match packet {
                 TcpPacket::WORK(WorkPacket { task_id, kind, data, .. }) => {
-                    (task_id, kind, Work::from_bytes(kind, &data), true, data.len())
+                    let work = Work::from_bytes(kind, &data);
+                    if let Ok(w) = &work {
+                        blobs.remember(w);
+                    }
+                    (task_id, kind, work, true, data.len())
+                }
+                TcpPacket::WORKREF(WorkRefPacket { task_id, kind, refs, data, .. }) => {
+                    let work = Work::from_bytes(kind, &data).and_then(|mut w| {
+                        blobs.remember(&w); // blobs sent inline alongside the refs
+                        Ok(blobs.resolve(&mut w, &refs).map(|()| w))
+                    });
+                    let work = match work {
+                        Ok(Ok(w)) => Ok(w),
+                        Ok(Err(missing)) => {
+                            log::debug!("Node {} lacks {} blob(s) for '{}'", self.id, missing.len(), task_id);
+                            let miss = TcpPacket::CACHEMISS(CacheMissPacket { task_id, missing });
+                            self.send_tcp_packet(peer_addr, miss).await?;
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    };
+                    (task_id, kind, work, true, data.len())
                 }
                 TcpPacket::TASKDATA(TaskDataPacket { task_id, kernel_data, .. }) => {
                     let kind = struum_types::network::WorkKind::Gpu;
@@ -927,7 +954,7 @@ mod tests {
     #[tokio::test]
     async fn test_node_intra_node_thread_scheduling() {
         let _lock = GL_TEST_MUTEX.lock().unwrap();
-        let mut node = Node::<1024>::with_id(UID::new(10), 38111, 38112, NodeBackend::OpenGL, 2)
+        let mut node = Node::<1024>::with_id(UID::new(10), 0, 0, NodeBackend::OpenGL, 2)
             .await
             .expect("Failed to initialize Node");
 
@@ -975,17 +1002,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_to_node_details_conversion() {
-        let node = Node::<1024>::new(38221, 38222, NodeBackend::Cpu, 1)
+        let node = Node::<1024>::new(0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node");
 
         // Test details()
         let details = node.details();
         assert_eq!(details.id, node.id);
-        assert_eq!(details.ip.port(), 38221);
+        assert_eq!(details.ip.port(), node.net.udp_port);
         assert_eq!(details.role, NodeRole::NODE);
         assert_eq!(details.backend, Some(NodeBackend::Cpu));
-        assert_eq!(details.tcp_port, Some(38222));
+        assert_eq!(details.tcp_port, Some(node.net.tcp_port));
 
         // Test From<&Node>
         let from_ref = NodeDetails::from(&node);
@@ -998,7 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_embedded_coordinator() {
-        let mut node = Node::<1024>::new(38331, 38332, NodeBackend::Cpu, 1)
+        let mut node = Node::<1024>::new(0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node");
 
@@ -1042,12 +1069,12 @@ mod tests {
     async fn test_tcp_task_data_transfer() {
         let _lock = GL_TEST_MUTEX.lock().unwrap();
         // Node 1 (Sender / Requester)
-        let mut node1 = Node::<1024>::with_id(UID::new(1), 38411, 38412, NodeBackend::Cpu, 1)
+        let mut node1 = Node::<1024>::with_id(UID::new(1), 0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node 1");
 
         // Node 2 (Receiver / Worker)
-        let mut node2 = Node::<1024>::with_id(UID::new(2), 38421, 38422, NodeBackend::OpenGL, 2)
+        let mut node2 = Node::<1024>::with_id(UID::new(2), 0, 0, NodeBackend::OpenGL, 2)
             .await
             .expect("Failed to initialize Node 2");
 
@@ -1128,15 +1155,19 @@ mod tests {
     async fn test_delayed_relay_startup_polling() {
         let _lock = GL_TEST_MUTEX.lock().unwrap();
 
-        let relay_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38901);
+        // A port that is free now; the relay binds it later in the test.
+        let relay_port = std::net::UdpSocket::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port();
+        let relay_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), relay_port);
 
         // Node 1 & Node 2 start BEFORE the relay server is created or running
-        let mut node1 = Node::<1024>::with_id(UID::new(1), 38911, 38912, NodeBackend::Cpu, 1)
+        let mut node1 = Node::<1024>::with_id(UID::new(1), 0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node 1");
-        let mut node2 = Node::<1024>::with_id(UID::new(2), 38921, 38922, NodeBackend::Cpu, 1)
+        let n1_tcp = node1.net.tcp_port;
+        let mut node2 = Node::<1024>::with_id(UID::new(2), 0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node 2");
+        let n2_tcp = node2.net.tcp_port;
 
         // Spawn async tasks for both nodes long-polling the offline relay
         let n1_handle = tokio::spawn(async move {
@@ -1154,7 +1185,7 @@ mod tests {
         assert!(!n2_handle.is_finished());
 
         // NOW start the relay server
-        let mut relay = RelayServer::<1024>::new(38901, 38902)
+        let mut relay = RelayServer::<1024>::new(relay_port, 0)
             .await
             .expect("Failed to create RelayServer");
 
@@ -1177,17 +1208,17 @@ mod tests {
 
         // Verify Node 1 discovered Node 2 and vice versa
         assert_eq!(n1_peer.id, UID::new(2));
-        assert_eq!(n1_peer.tcp_port, Some(38922));
+        assert_eq!(n1_peer.tcp_port, Some(n2_tcp));
 
         assert_eq!(n2_peer.id, UID::new(1));
-        assert_eq!(n2_peer.tcp_port, Some(38912));
+        assert_eq!(n2_peer.tcp_port, Some(n1_tcp));
 
         relay_handle.abort();
     }
 
     #[tokio::test]
     async fn test_skip_relay_if_peer_exists_in_coordinator() {
-        let mut node = Node::<1024>::with_id(UID::new(10), 38811, 38812, NodeBackend::Cpu, 1)
+        let mut node = Node::<1024>::with_id(UID::new(10), 0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node");
 

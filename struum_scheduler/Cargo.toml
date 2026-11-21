@@ -11,6 +11,7 @@ struum_types = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 bincode = { workspace = true }
+xxhash-rust = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
 log = { workspace = true }

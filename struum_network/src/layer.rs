@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::net::AddrParseError;
@@ -20,7 +20,7 @@ pub struct NetworkLayer<const BUF_SIZE: usize> {
     /// Public(Local) IPv4 address of itself, fetched during an outbound UDP connection.
     pub ip: IpAddr,
     /// A pool of connections of SocketAddresses with live connection made with other `NetworkLayer`s.
-    connections: HashMap<SocketAddr, Arc<Mutex<TcpStream>>>,
+    connections: HashMap<SocketAddr, Connection>,
     /// A reserved port to be used by the OS for UDP communication.
     pub udp_port: u16,
     /// A reserved port to be used by the OS for TCP communication.
@@ -54,6 +54,19 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             udp_socket: Arc::new(udp_socket),
             tcp_listener,
         })
+    }
+}
+
+/// One live TCP connection plus what we know about the peer on the other end.
+#[derive(Debug, Clone)]
+struct Connection {
+    stream: Arc<Mutex<TcpStream>>,
+    known_blobs: Arc<std::sync::Mutex<HashSet<u64>>>,
+}
+
+impl Connection {
+    fn new(stream: TcpStream) -> Self {
+        Self { stream: Arc::new(Mutex::new(stream)), known_blobs: Arc::default() }
     }
 }
 
@@ -105,7 +118,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         tune_stream(&stream);
 
         self.connections
-            .insert(target_addr, Arc::new(Mutex::new(stream)));
+            .insert(target_addr, Connection::new(stream));
 
         Ok(())
     }
@@ -216,9 +229,10 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     /// Returns a cloneable handle to the connection with `addr`, usable from
     /// other tasks without borrowing the `NetworkLayer`.
     pub fn peer(&self, addr: &SocketAddr) -> Option<PeerConnection> {
-        self.connections.get(addr).map(|stream| PeerConnection {
+        self.connections.get(addr).map(|conn| PeerConnection {
             addr: *addr,
-            stream: stream.clone(),
+            stream: conn.stream.clone(),
+            known_blobs: conn.known_blobs.clone(),
         })
     }
 
@@ -238,7 +252,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         tune_stream(&stream);
         log::info!("Accepted TCP connection from {}", peer_addr);
         self.connections
-            .insert(peer_addr, Arc::new(Mutex::new(stream)));
+            .insert(peer_addr, Connection::new(stream));
         Ok(peer_addr)
     }
 
@@ -260,9 +274,18 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
 pub struct PeerConnection {
     pub addr: SocketAddr,
     stream: Arc<Mutex<TcpStream>>,
+    /// Content hashes of blobs the peer is believed to hold for this connection
+    /// (see `TcpPacket::WORKREF`). Shared by every handle to the connection and
+    /// reset when it is replaced.
+    known_blobs: Arc<std::sync::Mutex<HashSet<u64>>>,
 }
 
 impl PeerConnection {
+    /// Locks the set of blob hashes the peer is believed to hold.
+    pub fn known_blobs(&self) -> std::sync::MutexGuard<'_, HashSet<u64>> {
+        self.known_blobs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Sends one length-prefixed packet.
     pub async fn send(&self, packet: &TcpPacket) -> Result<(), StruumError> {
         let mut stream = self.stream.lock().await;

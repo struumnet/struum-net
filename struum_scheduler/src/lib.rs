@@ -20,4 +20,4 @@ mod worker;
 
 pub use job::JobId;
 pub use scheduler::JobScheduler;
-pub use work::Work;
+pub use work::{BLOB_MIN_BYTES, BlobStore, MODULE_SLOT, Work, blob_hash};

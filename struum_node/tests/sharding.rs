@@ -12,9 +12,17 @@ use struum_types::network::{NodeBackend, NodeDetails, NodeRole, UID};
 
 /// A real worker: serves every requester that connects.
 async fn spawn_worker(id: u64) -> NodeDetails {
+    spawn_worker_with_cache(id, None).await
+}
+
+/// A real worker, optionally with a blob cache of `cache_bytes`.
+async fn spawn_worker_with_cache(id: u64, cache_bytes: Option<usize>) -> NodeDetails {
     let mut node = Node::<2048>::with_id(UID::new(id), 0, 0, NodeBackend::Cpu, 1)
         .await
         .expect("worker node");
+    if let Some(bytes) = cache_bytes {
+        node.blob_cache_bytes = bytes;
+    }
     let details = node.details();
     tokio::spawn(async move {
         loop {
@@ -201,4 +209,55 @@ async fn stats_count_contributions_both_ways() {
     assert_eq!(theirs.served.bytes_in, report.bytes_sent);
     assert_eq!(theirs.served.bytes_out, report.bytes_received);
     assert!(!theirs.working);
+}
+
+/// Selftest task plus a 64 KiB broadcast buffer, like weights in training.
+fn task_with_weights(n: usize, fill: f32) -> struum_cpu::CpuTask {
+    let mut task = selftest::task(n);
+    task.add_buffer(Buffer::new("weights", &vec![fill; 16_384]));
+    task
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_blobs_are_sent_once_per_peer() {
+    let peers = vec![spawn_worker(60).await, spawn_worker(61).await];
+    let mut node = requester(&peers).await;
+    let opts = ShardOptions { shards_per_peer: 3, ..ShardOptions::default() };
+    let weights = 16_384 * 4;
+    let n = 600;
+
+    let (first, r1) = node.run_sharded_with_report(task_with_weights(n, 1.0), &opts).await.unwrap();
+    // Each peer that took work needed the weights once; its other shards refer to them.
+    let full_sends = r1.completed_by.len() as u64;
+    assert_eq!(r1.bytes_saved, (6 - full_sends) * weights as u64, "{r1:?}");
+    let (second, r2) = node.run_sharded_with_report(task_with_weights(n, 1.0), &opts).await.unwrap();
+    // Same weights next job: no shard carries them.
+    assert_eq!(r2.bytes_saved, 6 * weights as u64, "{r2:?}");
+    assert_eq!(r2.bytes_sent + r2.bytes_saved, r1.bytes_sent + r1.bytes_saved);
+    assert_eq!(r2.cache_misses, 0);
+
+    // Identical results to a run without the cache.
+    let plain = ShardOptions { blob_cache: false, ..opts.clone() };
+    let (reference, r3) = node.run_sharded_with_report(task_with_weights(n, 1.0), &plain).await.unwrap();
+    assert_eq!(r3.bytes_saved, 0);
+    for out in [first, second] {
+        assert_eq!(out.to_bytes().unwrap(), reference.to_bytes().unwrap());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn evicted_blobs_are_resent_without_retiring_the_peer() {
+    // Room for less than one weights buffer: the worker never keeps them.
+    let peers = vec![spawn_worker_with_cache(70, Some(0)).await];
+    let mut node = requester(&peers).await;
+    let opts = ShardOptions { shards_per_peer: 2, ..ShardOptions::default() };
+
+    let (out, report) = node.run_sharded_with_report(task_with_weights(200, 2.0), &opts).await.unwrap();
+    assert!(report.cache_misses >= 1, "{report:?}");
+    assert_eq!(report.retries, 0);
+    assert!(report.retired.is_empty());
+    assert_eq!(
+        out.into_cpu_task().unwrap().get_buffer("y").unwrap().as_slice::<f32>(),
+        selftest::expected(200).as_slice()
+    );
 }

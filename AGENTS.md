@@ -12,6 +12,11 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
 - Sharded jobs (`run_sharded`) for CPU and GPU: pull-based shard queue, split/broadcast buffers,
   `SumF32` all-reduce outputs, shard reassignment on timeout/disconnect.
   `ShardReport` lists each shard's range (`ranges`) and the worker that completed it (`completed_on`).
+- Blob cache (`WORKREF` / `CACHEMISS`): wasm modules and buffers of 4 KiB or more go to each peer
+  once per connection, then by xxh3 hash. Workers keep an LRU store per requester
+  (`Node::blob_cache_bytes`, default `STRUUM_BLOB_CACHE_MB` = 1024); an evicted blob gets a
+  `CACHEMISS` reply and the shard is resent in full, without retiring the peer.
+  `ShardOptions::blob_cache` turns it off.
 - PoC: MNIST MLP training across workers (`examples/mnist_train.rs`). The step-0 distributed
   gradient matches a local computation, so training is the same locally or across devices.
 - Example: distributed path-traced render (`examples/render.rs`), deterministic however it's split.
@@ -38,10 +43,10 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   | Baseline | 4028 ms | 339.7 |
   | serde_bytes, zero-copy sends, 4 MiB socket buffers | 4031 ms | 339.7 |
   | No per-thread copies of broadcast buffers in the wasm executor | 1861 ms | 339.7 |
+  | Blob cache (`BLOB_CACHE=0` to compare: 1770 ms, 339.7 MB) | 1565 ms | 34.7 |
 
   Localhost hides bandwidth, so MB sent is the number that matters for Wi-Fi workers.
 
 ## Next
 
-- Blob cache (`WORKREF` / `CACHEMISS`): send modules and broadcast buffers to each peer once.
 - Pipelining (2 shards in flight per peer) and speculative re-runs of the last shards.

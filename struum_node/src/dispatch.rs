@@ -8,7 +8,7 @@
 //!   peer (up to `max_attempts` tries) and that peer is retired.
 //! - `WORKERROR` (shader error, wasm trap, ...): deterministic, so the whole job fails.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::sync::Arc;
@@ -22,7 +22,9 @@ use crate::stats::NodeStats;
 
 use struum_network::layer::PeerConnection;
 use struum_scheduler::Work;
-use struum_types::network::{NodeBackend, NodeDetails, TcpPacket, UID, WorkKind, WorkPacket};
+use struum_types::network::{
+    BlobRef, NodeBackend, NodeDetails, TcpPacket, UID, WorkKind, WorkPacket, WorkRefPacket,
+};
 use struum_types::{Shardable, StruumError, split_ranges};
 
 /// Tuning for [`crate::Node::run_sharded`].
@@ -34,6 +36,9 @@ pub struct ShardOptions {
     pub max_attempts: u32,
     /// How long to wait for one shard's result before reassigning it.
     pub shard_timeout: Duration,
+    /// Send large blobs (wasm modules, broadcast buffers) a peer already holds
+    /// by hash instead of in full. See `TcpPacket::WORKREF`.
+    pub blob_cache: bool,
 }
 
 impl Default for ShardOptions {
@@ -42,6 +47,7 @@ impl Default for ShardOptions {
             shards_per_peer: 2,
             max_attempts: 3,
             shard_timeout: Duration::from_secs(60),
+            blob_cache: true,
         }
     }
 }
@@ -66,6 +72,10 @@ pub struct ShardReport {
     pub bytes_sent: u64,
     /// Result payload bytes received from peers.
     pub bytes_received: u64,
+    /// Blob bytes not sent because the peer already held them.
+    pub bytes_saved: u64,
+    /// Shards resent in full because a peer had dropped a referenced blob.
+    pub cache_misses: usize,
     pub elapsed: Duration,
 }
 
@@ -84,6 +94,8 @@ struct Shared {
     retries: AtomicUsize,
     bytes_sent: AtomicU64,
     bytes_received: AtomicU64,
+    bytes_saved: AtomicU64,
+    cache_misses: AtomicUsize,
     /// Signalled when a shard completes or is requeued, waking idle peers.
     changed: Notify,
 }
@@ -123,7 +135,12 @@ pub(crate) async fn run_sharded(
         .map(|r| {
             let work = work.shard(r.clone())?;
             let bytes = work.to_bytes()?;
-            Ok(Arc::new(ShardPayload { work, bytes }))
+            let blobs = if opts.blob_cache { work.blobs() } else { Vec::new() };
+            let mut stripped = work.clone();
+            for b in &blobs {
+                stripped.take_blob(b.slot);
+            }
+            Ok(Arc::new(ShardPayload { work, bytes, blobs, stripped }))
         })
         .collect::<Result<_, StruumError>>()?;
     drop(work);
@@ -144,6 +161,8 @@ pub(crate) async fn run_sharded(
         retries: AtomicUsize::new(0),
         bytes_sent: AtomicU64::new(0),
         bytes_received: AtomicU64::new(0),
+        bytes_saved: AtomicU64::new(0),
+        cache_misses: AtomicUsize::new(0),
         changed: Notify::new(),
     });
     let payloads = Arc::new(payloads);
@@ -209,6 +228,8 @@ pub(crate) async fn run_sharded(
     report.retries = shared.retries.load(Ordering::SeqCst);
     report.bytes_sent = shared.bytes_sent.load(Ordering::SeqCst);
     report.bytes_received = shared.bytes_received.load(Ordering::SeqCst);
+    report.bytes_saved = shared.bytes_saved.load(Ordering::SeqCst);
+    report.cache_misses = shared.cache_misses.load(Ordering::SeqCst);
     report.elapsed = started.elapsed();
     log::info!(
         "Sharded job finished in {:?}: {} shard(s), {} retr{}, per peer {:?}",
@@ -225,7 +246,43 @@ pub(crate) async fn run_sharded(
 /// One shard as sent to peers, plus the request itself for restoring elided buffers.
 struct ShardPayload {
     work: Work,
+    /// `work` serialized in full.
     bytes: Vec<u8>,
+    /// Blobs of `work` worth sending by reference.
+    blobs: Vec<BlobRef>,
+    /// `work` with every blob in `blobs` emptied.
+    stripped: Work,
+}
+
+impl ShardPayload {
+    /// The packet header and payload to send to a peer holding `known` blobs:
+    /// plain `WORK` if it holds none of them, else `WORKREF` with the held ones
+    /// left out. Returns the bytes saved.
+    fn encode_for(
+        &self,
+        known: &HashSet<u64>,
+        task_id: String,
+        sender_id: UID,
+        kind: WorkKind,
+    ) -> Result<(TcpPacket, std::borrow::Cow<'_, [u8]>, u64), StruumError> {
+        let (refs, inline): (Vec<BlobRef>, Vec<BlobRef>) =
+            self.blobs.iter().partition(|b| known.contains(&b.hash));
+        if refs.is_empty() {
+            let header = TcpPacket::WORK(WorkPacket { task_id, sender_id, kind, data: Vec::new() });
+            return Ok((header, std::borrow::Cow::Borrowed(&self.bytes), 0));
+        }
+        let mut work = self.stripped.clone();
+        for b in &inline {
+            let bytes = self.work.blob_bytes(b.slot).expect("blob slot exists").to_vec();
+            work.put_blob(b.slot, bytes);
+        }
+        let saved = refs
+            .iter()
+            .map(|b| self.work.blob_bytes(b.slot).map_or(0, |d| d.len() as u64))
+            .sum();
+        let header = TcpPacket::WORKREF(WorkRefPacket { task_id, sender_id, kind, refs, data: Vec::new() });
+        Ok((header, std::borrow::Cow::Owned(work.to_bytes()?), saved))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -257,24 +314,39 @@ async fn peer_loop(
             continue;
         };
 
-        // The shard bytes are written straight from `payloads`, not copied into the packet.
-        let header = TcpPacket::WORK(WorkPacket {
-            task_id: format!("{job_id}/{idx}"),
-            sender_id,
-            kind,
-            data: Vec::new(),
-        });
-        log::debug!("Shard {} (attempt {}) -> {}", idx, attempt + 1, peer.addr);
+        // Full shards are written straight from `payloads`, not copied into the packet.
+        let payload = &payloads[idx];
+        let known = peer.known_blobs().clone();
+        let (header, body, saved) = payload.encode_for(&known, format!("{job_id}/{idx}"), sender_id, kind)?;
+        log::debug!("Shard {} (attempt {}) -> {} ({} bytes)", idx, attempt + 1, peer.addr, body.len());
 
-        shared.bytes_sent.fetch_add(payloads[idx].bytes.len() as u64, Ordering::Relaxed);
+        shared.bytes_sent.fetch_add(body.len() as u64, Ordering::Relaxed);
+        shared.bytes_saved.fetch_add(saved, Ordering::Relaxed);
+        // The peer keeps every blob it receives, inline or already held.
+        peer.known_blobs().extend(payload.blobs.iter().map(|b| b.hash));
         let sent_at = Instant::now();
-        let reply = tokio::time::timeout(opts.shard_timeout, peer.request_with_payload(&header, &payloads[idx].bytes)).await;
+        let reply = tokio::time::timeout(opts.shard_timeout, peer.request_with_payload(&header, &body)).await;
+        if let Ok(Ok(TcpPacket::CACHEMISS(miss))) = &reply {
+            // The peer dropped some blobs: forget them and send this shard again in full.
+            log::debug!("Peer {} missed {} blob(s) for shard {}", peer.addr, miss.missing.len(), idx);
+            {
+                let mut known = peer.known_blobs();
+                for h in &miss.missing {
+                    known.remove(h);
+                }
+            }
+            shared.cache_misses.fetch_add(1, Ordering::SeqCst);
+            shared.bytes_saved.fetch_sub(saved, Ordering::Relaxed);
+            shared.queue.lock().await.push_front((idx, attempt));
+            shared.changed.notify_waiters();
+            continue;
+        }
         let received = match &reply {
             Ok(Ok(TcpPacket::RESULT(res))) => res.result_data.len() as u64,
             _ => 0,
         };
         shared.bytes_received.fetch_add(received, Ordering::Relaxed);
-        let sent = payloads[idx].bytes.len() as u64;
+        let sent = body.len() as u64;
         let record = |ok: bool| {
             if let Some(stats) = stats {
                 stats.used(peer.addr, ok, sent, received, sent_at.elapsed());
