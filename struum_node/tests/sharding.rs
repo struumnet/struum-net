@@ -41,6 +41,47 @@ enum Faulty {
     Hangs,
 }
 
+/// A real worker behind a proxy that holds each reply back for `delay`.
+async fn spawn_slow(id: u64, delay: Duration) -> NodeDetails {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let worker = spawn_worker(id + 1000).await;
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (client, _) = listener.accept().await.unwrap();
+            let upstream = tokio::net::TcpStream::connect(worker.tcp_addr().unwrap()).await.unwrap();
+            let (mut client_rx, mut client_tx) = client.into_split();
+            let (mut up_rx, mut up_tx) = upstream.into_split();
+            tokio::spawn(async move { tokio::io::copy(&mut client_rx, &mut up_tx).await });
+            tokio::spawn(async move {
+                // Forward whole frames, each after `delay`.
+                loop {
+                    let mut len = [0u8; 4];
+                    if up_rx.read_exact(&mut len).await.is_err() {
+                        return;
+                    }
+                    let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+                    if up_rx.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(delay).await;
+                    if client_tx.write_all(&len).await.is_err() || client_tx.write_all(&body).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    NodeDetails {
+        id: UID::new(id),
+        ip: SocketAddr::new("127.0.0.1".parse().unwrap(), 1),
+        role: NodeRole::NODE,
+        backend: Some(NodeBackend::Cpu),
+        tcp_port: Some(port),
+    }
+}
+
 /// A misbehaving worker that only speaks raw TCP.
 async fn spawn_faulty(id: u64, mode: Faulty) -> NodeDetails {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -112,7 +153,8 @@ async fn cpu_task_is_sharded_across_workers() {
     // Transfer accounting: inputs and outputs both cross the wire.
     assert_eq!(report.round_trip.len(), 6);
     assert!(report.round_trip.iter().all(|d| !d.is_zero()));
-    assert!(report.bytes_sent >= (n * 8) as u64, "{}", report.bytes_sent);
+    // Identical blobs (the zeroed `y` of equal-length shards) may go by reference.
+    assert!(report.bytes_sent + report.bytes_saved >= (n * 8) as u64, "{report:?}");
     assert!(report.bytes_received >= (n * 4) as u64, "{}", report.bytes_received);
 }
 
@@ -126,8 +168,10 @@ async fn shards_from_failed_peers_are_reassigned() {
     ];
     let mut node = requester(&peers).await;
 
+    // Without speculation, so the hung peer's shards wait out the timeout and get reassigned.
     let opts = ShardOptions {
         shard_timeout: Duration::from_secs(2),
+        speculate: false,
         ..ShardOptions::default()
     };
     let n = 4_000;
@@ -139,7 +183,8 @@ async fn shards_from_failed_peers_are_reassigned() {
 
     assert_eq!(out.get_buffer("y").unwrap().as_slice::<f32>(), selftest::expected(n).as_slice());
     assert_eq!(report.retired.len(), 2, "{report:?}");
-    assert_eq!(report.retries, 2, "{report:?}");
+    // Each bad peer held up to `in_flight` (2) shards, all reassigned.
+    assert!((2..=4).contains(&report.retries), "{report:?}");
     // Retired peers are forgotten for later jobs.
     assert_eq!(node.node_count(), 2);
 
@@ -222,7 +267,8 @@ fn task_with_weights(n: usize, fill: f32) -> struum_cpu::CpuTask {
 async fn repeated_blobs_are_sent_once_per_peer() {
     let peers = vec![spawn_worker(60).await, spawn_worker(61).await];
     let mut node = requester(&peers).await;
-    let opts = ShardOptions { shards_per_peer: 3, ..ShardOptions::default() };
+    // No speculative copies: they would add to the exact byte counts below.
+    let opts = ShardOptions { shards_per_peer: 3, speculate: false, ..ShardOptions::default() };
     let weights = 16_384 * 4;
     let n = 600;
 
@@ -260,4 +306,53 @@ async fn evicted_blobs_are_resent_without_retiring_the_peer() {
         out.into_cpu_task().unwrap().get_buffer("y").unwrap().as_slice::<f32>(),
         selftest::expected(200).as_slice()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipelined_results_match_plain_request_response() {
+    let peers = vec![spawn_worker(80).await, spawn_worker(81).await];
+    let mut node = requester(&peers).await;
+    let n = 5_000;
+    let base = ShardOptions { shards_per_peer: 4, speculate: false, ..ShardOptions::default() };
+    let (plain, r1) = node
+        .run_sharded_with_report(task_with_weights(n, 3.0), &ShardOptions { in_flight: 1, ..base.clone() })
+        .await
+        .unwrap();
+    let (piped, r2) = node
+        .run_sharded_with_report(task_with_weights(n, 3.0), &ShardOptions { in_flight: 3, ..base })
+        .await
+        .unwrap();
+    assert_eq!(piped.to_bytes().unwrap(), plain.to_bytes().unwrap());
+    assert_eq!((r1.retries, r2.retries), (0, 0));
+    assert_eq!(r2.completed_by.values().sum::<usize>(), 8);
+    assert_eq!(
+        piped.into_cpu_task().unwrap().get_buffer("y").unwrap().as_slice::<f32>(),
+        selftest::expected(n).as_slice()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_peers_rerun_shards_stuck_on_a_slow_peer() {
+    let delay = Duration::from_secs(3);
+    let peers = vec![spawn_worker(90).await, spawn_slow(91, delay).await];
+    let mut node = requester(&peers).await;
+    let opts = ShardOptions::default();
+
+    for (job, n) in [(1, 2_000), (2, 3_000)] {
+        let (out, report) = node.run_sharded_with_report(selftest::task(n), &opts).await.unwrap();
+        assert_eq!(
+            out.into_cpu_task().unwrap().get_buffer("y").unwrap().as_slice::<f32>(),
+            selftest::expected(n).as_slice(),
+            "job {job}"
+        );
+        // Job 1: the slow peer's shards were re-run on the fast one instead of awaited.
+        // Job 2: the slow peer is still finishing job 1's copies, so the fast one takes it all.
+        if job == 1 {
+            assert!(report.speculative_wins >= 1, "{report:?}");
+        }
+        assert!(report.retired.is_empty(), "job {job}: {report:?}");
+        assert!(report.elapsed < delay, "job {job}: {report:?}");
+    }
+    // The slow peer's late replies were drained, not mistaken for the second job's.
+    assert_eq!(node.node_count(), 2);
 }

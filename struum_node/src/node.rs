@@ -257,6 +257,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             .filter(|p| dispatch::peer_accepts(p, kind))
             .filter_map(|p| p.tcp_addr())
             .filter_map(|addr| self.net.peer(&addr))
+            .filter(|peer| !peer.is_broken())
             .collect()
     }
 

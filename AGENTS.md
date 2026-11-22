@@ -17,6 +17,15 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   (`Node::blob_cache_bytes`, default `STRUUM_BLOB_CACHE_MB` = 1024); an evicted blob gets a
   `CACHEMISS` reply and the shard is resent in full, without retiring the peer.
   `ShardOptions::blob_cache` turns it off.
+- Pipelining: each peer keeps `ShardOptions::in_flight` shards outstanding (default 2). Connections
+  have separate read and write halves, and replies are checked against the shard that's due.
+  If a peer fails, every shard it held is requeued. A read or write cut off part-way marks the
+  connection broken, so it's never misread later.
+- Speculation (`ShardOptions::speculate`, on by default): once the queue is empty, an idle peer
+  re-runs the oldest outstanding shard after it has taken more than twice the mean round trip,
+  at most once per shard. The first result wins and the job returns without waiting. The slow
+  peer's task drains the late reply in the background and holds that connection's reader until
+  it does. `ShardReport` adds `speculative_runs` and `speculative_wins`.
 - PoC: MNIST MLP training across workers (`examples/mnist_train.rs`). The step-0 distributed
   gradient matches a local computation, so training is the same locally or across devices.
 - Example: distributed path-traced render (`examples/render.rs`), deterministic however it's split.
@@ -44,9 +53,16 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   | serde_bytes, zero-copy sends, 4 MiB socket buffers | 4031 ms | 339.7 |
   | No per-thread copies of broadcast buffers in the wasm executor | 1861 ms | 339.7 |
   | Blob cache (`BLOB_CACHE=0` to compare: 1770 ms, 339.7 MB) | 1565 ms | 34.7 |
+  | Pipelining + speculation (`IN_FLIGHT=1 SPECULATE=0`: ~1540 ms) | ~1570 ms | 34.8 |
+
+  Localhost has no link latency to hide, so pipelining is neutral there. Speculating at 1× the
+  mean round trip cost ~10% (copies compete for the same CPU), so the threshold is 2×.
+  Both are for real devices: Wi-Fi round trips and a slow phone holding the last shard.
 
   Localhost hides bandwidth, so MB sent is the number that matters for Wi-Fi workers.
 
 ## Next
 
-- Pipelining (2 shards in flight per peer) and speculative re-runs of the last shards.
+- Measure pipelining and speculation on real devices (desktop plus a phone on Wi-Fi) with
+  `RELAY_ADDR=... cargo run --release --example bench`.
+- WAN: QUIC transport, hole punching with relay fallback, token auth (plan on `feat/wan-quic-transport`).

@@ -12,6 +12,7 @@
 //!
 //! Env: SCENARIO (all|split|broadcast), PEERS (4), ITEMS (1_000_000), WEIGHTS_MB (8),
 //!      STEPS (5), SHARDS_PER_PEER (2), BLOB_CACHE (1; 0 sends every blob in full),
+//!      IN_FLIGHT (2; shards outstanding per peer), SPECULATE (1; 0 turns off re-running stragglers),
 //!      BENCH_JSON (path), RELAY_ADDR, MIN_PEERS
 //!
 //! `cargo run --release --example bench`
@@ -146,6 +147,8 @@ async fn main() -> Result<(), StruumError> {
     let opts = ShardOptions {
         shards_per_peer: env_or("SHARDS_PER_PEER", 2),
         blob_cache: env_or("BLOB_CACHE", 1u8) != 0,
+        in_flight: env_or("IN_FLIGHT", 2),
+        speculate: env_or("SPECULATE", 1u8) != 0,
         ..ShardOptions::default()
     };
 
