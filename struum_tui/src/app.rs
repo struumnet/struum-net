@@ -15,7 +15,12 @@ pub struct NodeInfo {
     pub id: UID,
     pub ip: IpAddr,
     pub udp_port: u16,
-    pub tcp_port: u16,
+    /// UDP port requesters reach us on over QUIC.
+    pub quic_port: u16,
+    /// `None` when TCP serving is off (a token is set).
+    pub tcp_port: Option<u16>,
+    /// Whether requesters must know `STRUUM_TOKEN`.
+    pub authenticated: bool,
     pub backend: NodeBackend,
 }
 
@@ -146,8 +151,8 @@ fn add(t: &mut Tally, o: &Tally) {
 
 /// Joins introduced peers with the per-peer tallies.
 ///
-/// `used_by_peer` is keyed by the worker's TCP address, which matches the
-/// introduced peer exactly. `served_by_peer` is keyed by the requester's
+/// `used_by_peer` is keyed by the worker's QUIC or TCP address, which matches
+/// the introduced peer exactly. `served_by_peer` is keyed by the requester's
 /// ephemeral source address, so it matches by IP when exactly one known peer
 /// has that IP; anything else gets its own row with no id.
 pub fn neighbour_rows(discovery: &Discovery, stats: &StatsSnapshot, sort: SortKey) -> Vec<PeerRow> {
@@ -158,16 +163,17 @@ pub fn neighbour_rows(discovery: &Discovery, stats: &StatsSnapshot, sort: SortKe
     for p in discovery.peers.values() {
         let idx = rows.len();
         let tcp = p.details.tcp_addr();
+        let quic = p.details.quic_addr();
         rows.push(PeerRow {
             id: Some(p.details.id),
-            addr: tcp.map(|a| a.to_string()).unwrap_or_else(|| p.details.ip.to_string()),
+            addr: quic.or(tcp).map(|a| a.to_string()).unwrap_or_else(|| p.details.ip.to_string()),
             backend: p.details.backend,
             last_seen: Some(now.saturating_duration_since(p.last_seen)),
             for_them: Tally::default(),
             for_us: Tally::default(),
         });
-        if let Some(tcp) = tcp {
-            by_tcp.insert(tcp, idx);
+        for addr in [tcp, quic].into_iter().flatten() {
+            by_tcp.insert(addr, idx);
         }
         by_ip.entry(p.details.ip.ip()).or_default().push(idx);
     }
@@ -228,6 +234,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(backend),
             tcp_port: Some(tcp),
+            quic_port: None,
         }
     }
 

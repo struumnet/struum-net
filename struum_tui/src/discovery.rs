@@ -2,8 +2,8 @@
 //!
 //! The [`Node`](struum_node::Node) is busy serving requesters (which needs
 //! `&mut Node`), so discovery runs on a separate UDP socket. It registers with
-//! the relay under the node's id and TCP port, so requesters introduced to us
-//! connect straight to the serving node, while introductions come back to this
+//! the relay under the node's id and QUIC (and TCP) ports, so requesters
+//! introduced to us connect straight to the serving node, while introductions come back to this
 //! socket.
 
 use std::collections::HashMap;
@@ -75,7 +75,9 @@ pub struct Registration {
     /// Unspecified lets the relay use the address it sees us from.
     pub ip: IpAddr,
     pub backend: NodeBackend,
-    pub tcp_port: u16,
+    /// `None` when the node doesn't serve TCP.
+    pub tcp_port: Option<u16>,
+    pub quic_port: Option<u16>,
 }
 
 /// Binds the discovery socket. Returns it with its local UDP port.
@@ -94,7 +96,8 @@ pub async fn run(socket: UdpSocket, me: Registration, shared: SharedDiscovery, i
         ip: SocketAddr::new(me.ip, port),
         role: NodeRole::NODE,
         backend: Some(me.backend),
-        tcp_port: Some(me.tcp_port),
+        tcp_port: me.tcp_port,
+        quic_port: me.quic_port,
     };
     let packet = bincode::serialize(&intro).expect("introduction serializes");
     let mut buf = vec![0u8; 2048];

@@ -32,6 +32,7 @@ impl TestNode {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
             tcp_port: Some(self.net.tcp_port),
+            quic_port: None,
         };
         self.net
             .send_udp_data(UdpPacket::INTRODUCTION(intro), local(relay_port))

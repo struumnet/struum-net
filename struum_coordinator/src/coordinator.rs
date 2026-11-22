@@ -77,6 +77,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::OpenGL),
             tcp_port: Some(38012),
+            quic_port: None,
         };
         let node2 = NodeDetails {
             id: UID::new(2),
@@ -84,6 +85,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
             tcp_port: Some(38022),
+            quic_port: None,
         };
 
         coordinator.register_node(node1.clone());

@@ -92,6 +92,7 @@ async fn spawn_slow(id: u64, delay: Duration) -> NodeDetails {
         role: NodeRole::NODE,
         backend: Some(NodeBackend::Cpu),
         tcp_port: Some(port),
+        quic_port: None,
     }
 }
 
@@ -120,6 +121,7 @@ async fn spawn_faulty(id: u64, mode: Faulty) -> NodeDetails {
         role: NodeRole::NODE,
         backend: Some(NodeBackend::Cpu),
         tcp_port: Some(port),
+        quic_port: None,
     }
 }
 

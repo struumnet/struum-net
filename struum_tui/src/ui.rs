@@ -91,8 +91,10 @@ fn header(f: &mut Frame, area: Rect, s: &AppState) {
             Span::raw(s.node.ip.to_string()),
             "  udp ".dim(),
             Span::raw(s.node.udp_port.to_string()),
+            "  quic ".dim(),
+            Span::raw(s.node.quic_port.to_string()),
             "  tcp ".dim(),
-            Span::raw(s.node.tcp_port.to_string()),
+            Span::raw(s.node.tcp_port.map_or_else(|| "off".to_string(), |p| p.to_string())),
             "  backend ".dim(),
             Span::raw(format!("{:?}", s.node.backend)),
         ]),
@@ -101,6 +103,12 @@ fn header(f: &mut Frame, area: Rect, s: &AppState) {
             Span::raw(s.relay.to_string()),
             " ".into(),
             Span::styled(relay, Style::default().fg(color)),
+            "  auth ".dim(),
+            if s.node.authenticated {
+                Span::styled("token", Style::default().fg(Color::Green))
+            } else {
+                Span::styled("open", Style::default().fg(Color::Yellow))
+            },
             "  up ".dim(),
             Span::raw(dur(s.stats.uptime)),
             "  ".into(),
@@ -232,7 +240,7 @@ fn logs(f: &mut Frame, area: Rect, s: &AppState) {
 fn help(f: &mut Frame) {
     let area = f.area();
     let w = 56.min(area.width);
-    let h = 11.min(area.height);
+    let h = 14.min(area.height);
     let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
     let text = vec![
         Line::raw("q, Ctrl-C   quit"),
@@ -243,6 +251,9 @@ fn help(f: &mut Frame) {
         Line::raw("for you:  shards that peer ran for you"),
         Line::raw("? id:     traffic from an address the relay"),
         Line::raw("          never introduced (or shared IP)"),
+        Line::raw(""),
+        Line::raw("auth token: only nodes with the same STRUUM_TOKEN"),
+        Line::raw("            get in; TCP is off. open: anyone can."),
     ];
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(title("Help")), rect);
@@ -265,7 +276,9 @@ mod tests {
                 id: UID::new(0xabc123),
                 ip: "192.168.1.20".parse().unwrap(),
                 udp_port: 40001,
-                tcp_port: 40002,
+                quic_port: 40003,
+                tcp_port: None,
+                authenticated: true,
                 backend: NodeBackend::OpenGL,
             },
             relay: "192.168.1.10:39001".parse().unwrap(),

@@ -31,6 +31,7 @@ fn introduction_round_trips_into_node_details() {
         role: NodeRole::NODE,
         backend: Some(NodeBackend::OpenGL),
         tcp_port: Some(4001),
+        quic_port: None,
     };
     let decoded: IntroductionPacket =
         bincode::deserialize(&bincode::serialize(&intro).unwrap()).unwrap();
@@ -49,6 +50,7 @@ fn node_without_tcp_port_has_no_tcp_addr() {
         role: NodeRole::COORDINATOR,
         backend: None,
         tcp_port: None,
+        quic_port: None,
     };
     assert_eq!(details.tcp_addr(), None);
 }

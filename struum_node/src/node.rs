@@ -7,6 +7,7 @@ use tokio::sync::mpsc::{self, Receiver};
 use struum_kernel::Kernel;
 use struum_network::layer::NetworkLayer;
 use struum_network::layer::PeerConnection;
+use struum_network::quic::{QuicLayer, QuicPeer};
 use struum_scheduler::{BlobStore, JobId, JobScheduler, Work};
 use struum_types::StruumError;
 use struum_types::network::{
@@ -110,6 +111,10 @@ pub struct Node<const BUF_SIZE: usize> {
     /// Bytes of blobs kept per requester connection when serving (see
     /// `TcpPacket::WORKREF`). Defaults to `STRUUM_BLOB_CACHE_MB` (1024 MiB).
     pub blob_cache_bytes: usize,
+    /// QUIC endpoint, once enabled ([`Node::enable_quic`]) or first needed to dial.
+    quic: Option<Arc<QuicLayer>>,
+    /// Authenticated QUIC connections to peers, by the peer's advertised QUIC address.
+    quic_peers: HashMap<SocketAddr, QuicPeer>,
 }
 
 impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
@@ -166,6 +171,8 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             relay_addr: None,
             stats: Arc::new(NodeStats::default()),
             blob_cache_bytes: BlobStore::env_limit_bytes(),
+            quic: None,
+            quic_peers: HashMap::new(),
         })
     }
 
@@ -215,13 +222,47 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
     // --- Sharded execution across peers (see `dispatch`) ---
 
-    /// Opens TCP connections to every given peer that advertises a TCP port.
-    /// Returns the TCP addresses that are connected (already-open ones included).
+    /// Starts a QUIC endpoint on UDP `port` (0 picks one) that peers must
+    /// authenticate to with `token` (see `struum_network::quic`). Returns the
+    /// port. Accepting is up to the caller: see [`Node::quic`].
+    pub fn enable_quic(&mut self, port: u16, token: &[u8]) -> Result<u16, StruumError> {
+        let layer = QuicLayer::bind(SocketAddr::from(([0, 0, 0, 0], port)), self.id.inner, token)?;
+        let port = layer.local_addr()?.port();
+        log::info!("Node {} serving QUIC on UDP {}", self.id, port);
+        self.quic = Some(Arc::new(layer));
+        Ok(port)
+    }
+
+    /// The QUIC endpoint, if enabled: accept requesters with `quic().accept()`
+    /// and serve each with [`PeerServer::serve`].
+    pub fn quic(&self) -> Option<Arc<QuicLayer>> {
+        self.quic.clone()
+    }
+
+    /// UDP port of the QUIC endpoint, if enabled.
+    pub fn quic_port(&self) -> Option<u16> {
+        self.quic.as_ref().and_then(|q| q.local_addr().ok()).map(|a| a.port())
+    }
+
+    /// Connects to every given peer: over QUIC if it advertises a QUIC port,
+    /// otherwise over TCP. Returns the addresses connected (already-open ones
+    /// included).
+    ///
+    /// A QUIC peer is never retried over TCP: if it rejects our token, it
+    /// isn't one of ours. The first QUIC peer starts this node's QUIC endpoint
+    /// (token from `STRUUM_TOKEN`) unless [`Node::enable_quic`] already did.
     pub async fn connect_to_peers(&mut self, peers: &[NodeDetails]) -> Vec<SocketAddr> {
         let mut connected = Vec::new();
         for peer in peers {
+            if let Some(addr) = peer.quic_addr() {
+                match self.connect_quic(addr).await {
+                    Ok(()) => connected.push(addr),
+                    Err(e) => log::warn!("Could not connect to peer {} over QUIC at {}: {}", peer.id, addr, e),
+                }
+                continue;
+            }
             let Some(addr) = peer.tcp_addr() else {
-                log::warn!("Peer {} has no TCP port; skipping", peer.id);
+                log::warn!("Peer {} has no TCP or QUIC port; skipping", peer.id);
                 continue;
             };
             if self.net.peer(&addr).is_some() {
@@ -236,14 +277,30 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         connected
     }
 
+    async fn connect_quic(&mut self, addr: SocketAddr) -> Result<(), StruumError> {
+        if self.quic_peers.get(&addr).is_some_and(|p| !p.conn.is_broken()) {
+            return Ok(());
+        }
+        if self.quic.is_none() {
+            self.enable_quic(0, &struum_network::quic::token_from_env())?;
+        }
+        let quic = self.quic.clone().expect("enabled above");
+        let peer = quic.connect(addr).await?;
+        log::info!("Node {} connected to peer {} over QUIC at {}", self.id, peer.id, addr);
+        self.quic_peers.insert(addr, peer);
+        Ok(())
+    }
+
     /// Connected peers that can run `kind` work.
     fn eligible_peers(&self, kind: struum_types::network::WorkKind) -> Vec<PeerConnection> {
         self.coordinator
             .get_nodes()
             .into_iter()
             .filter(|p| dispatch::peer_accepts(p, kind))
-            .filter_map(|p| p.tcp_addr())
-            .filter_map(|addr| self.net.peer(&addr))
+            .filter_map(|p| match p.quic_addr() {
+                Some(addr) => self.quic_peers.get(&addr).map(|q| q.conn.clone()),
+                None => p.tcp_addr().and_then(|addr| self.net.peer(&addr)),
+            })
             .filter(|peer| !peer.is_broken())
             .collect()
     }
@@ -297,11 +354,14 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             // Forget peers that failed so later jobs skip them.
             for addr in &report.retired {
                 self.net.disconnect(addr);
+                if let Some(peer) = self.quic_peers.remove(addr) {
+                    peer.close();
+                }
                 let ids: Vec<UID> = self
                     .coordinator
                     .get_nodes()
                     .into_iter()
-                    .filter(|p| p.tcp_addr() == Some(*addr))
+                    .filter(|p| p.tcp_addr() == Some(*addr) || p.quic_addr() == Some(*addr))
                     .map(|p| p.id)
                     .collect();
                 for id in ids {
@@ -686,6 +746,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             role: NodeRole::NODE,
             backend: Some(self.backend),
             tcp_port: Some(self.net.tcp_port),
+            quic_port: self.quic_port(),
         }
     }
 
@@ -776,6 +837,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                     role: node_b.role,
                     backend: node_b.backend,
                     tcp_port: node_b.tcp_port,
+                    quic_port: node_b.quic_port,
                 }),
                 node_a.ip,
             )
@@ -790,6 +852,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                     role: node_a.role,
                     backend: node_a.backend,
                     tcp_port: node_a.tcp_port,
+                    quic_port: node_a.quic_port,
                 }),
                 node_b.ip,
             )
@@ -828,6 +891,7 @@ impl<const BUF_SIZE: usize> NetworkCommunicator for Node<BUF_SIZE> {
                     role: NodeRole::NODE,
                     backend: Some(self.backend),
                     tcp_port: Some(self.net.tcp_port),
+                    quic_port: self.quic_port(),
                 }),
                 ip,
             )
@@ -990,6 +1054,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::OpenGL),
             tcp_port: Some(38342),
+            quic_port: None,
         };
         let peer2 = NodeDetails {
             id: UID::new(102),
@@ -997,6 +1062,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
             tcp_port: Some(38352),
+            quic_port: None,
         };
 
         // Access via node delegation
@@ -1183,6 +1249,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
             tcp_port: Some(38822),
+            quic_port: None,
         };
 
         // Manually insert known peer into node's coordinator

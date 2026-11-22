@@ -10,10 +10,13 @@
 //! - [`app`]: [`app::AppState`], a plain struct built from a
 //!   [`StatsSnapshot`](struum_node::StatsSnapshot) and the peer list.
 //! - [`ui`]: draws an [`app::AppState`] with ratatui.
+//! - [`serving`]: accepts requesters over QUIC (and TCP when no token is set) and
+//!   serves each in its own task.
 //! - [`logger`]: a `log` backend writing into a ring buffer shown in the log pane.
 
 pub mod app;
 pub mod discovery;
 pub mod logger;
 pub mod selftest;
+pub mod serving;
 pub mod ui;

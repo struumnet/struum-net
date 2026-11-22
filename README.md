@@ -27,11 +27,17 @@ minute), what each neighbour did for you and you for them, peers by backend, and
 
 ```bash
 cargo run -p struum_relay                               # relay, if none is running
-cargo run --release -p struum_tui -- --relay <relay-ip>:39001 [--backend cpu|opengl]
+STRUUM_TOKEN=<secret> cargo run --release -p struum_tui -- --relay <relay-ip>:39001 [--backend cpu|opengl]
 ```
 
+The TUI serves requesters over QUIC. With `STRUUM_TOKEN` set (the header shows `auth token`), only
+requesters with the same token get in, and TCP is off (`tcp off`). Without one it's `open` and
+serves TCP too. Requesters need nothing new: `connect_to_peers` dials QUIC for peers that advertise
+it, with the token from `STRUUM_TOKEN`, e.g.
+`STRUUM_TOKEN=<secret> RELAY_ADDR=<relay-ip>:39001 cargo run --release --example render`.
+
 Keys: `q` quit, `Tab` change neighbour sort, `?` help. Ports default to OS-assigned
-(`--udp-port`, `--tcp-port`, or `NODE_UDP_PORT` / `NODE_TCP_PORT`).
+(`--udp-port`, `--quic-port`, `--tcp-port`, or `NODE_UDP_PORT` / `NODE_QUIC_PORT` / `NODE_TCP_PORT`).
 
 ## Android worker
 
@@ -109,8 +115,8 @@ Set `RELAY_ADDR=<pc-lan-ip>:39001` on requesters when workers are on other devic
 `struum_network::quic::QuicLayer` is one UDP socket that accepts and dials over QUIC (TLS 1.3).
 Nodes must share `STRUUM_TOKEN`: on connect, each side proves it knows the token with an HMAC over
 both TLS certificates, so peers without it are refused. Without a token, any struum node can
-connect. Peers run the same `PeerConnection` protocol as TCP. Workers and the relay don't use it
-yet; see AGENTS.md.
+connect. Peers run the same `PeerConnection` protocol as TCP. `struum-tui` serves over it and
+requesters dial it. `struum_worker` and the relay still use TCP/UDP; see AGENTS.md.
 
 ## Tests
 

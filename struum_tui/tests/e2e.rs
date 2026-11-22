@@ -12,7 +12,9 @@ use struum_node::{Node, ShardOptions};
 use struum_relay::RelayServer;
 use struum_tui::app::{AppState, History, NodeInfo, SortKey, neighbour_rows};
 use struum_tui::discovery::{self, Discovery, RelayStatus, Registration};
-use struum_tui::ui;
+use struum_tui::{serving, ui};
+
+const TOKEN: &[u8] = b"e2e-token";
 use struum_types::network::{NodeBackend, UID};
 
 fn render(state: &AppState) -> String {
@@ -33,29 +35,35 @@ async fn joins_serves_and_shows_contributions() {
     let relay_addr = SocketAddr::from(([127, 0, 0, 1], relay.net.udp_port));
     tokio::spawn(async move { relay.run().await });
 
-    // This node: serving Node + discovery socket.
-    let mut node = Node::<2048>::with_id(UID::generate(), 0, 0, NodeBackend::Cpu, 1).await.unwrap();
+    // This node: serving Node (QUIC, token required) + discovery socket.
+    let node = Node::<2048>::with_id(UID::generate(), 0, 0, NodeBackend::Cpu, 1).await.unwrap();
+    let (id, ip) = (node.id, node.net.ip);
+    let stats = node.stats();
+    let listening = serving::start(node, 0, TOKEN).unwrap();
+    assert_eq!(listening.tcp_port, None, "a token turns TCP off");
     let info = NodeInfo {
-        id: node.id,
-        ip: node.net.ip,
+        id,
+        ip,
         udp_port: 0,
-        tcp_port: node.net.tcp_port,
+        quic_port: listening.quic_port,
+        tcp_port: listening.tcp_port,
+        authenticated: listening.authenticated,
         backend: NodeBackend::Cpu,
     };
-    let stats = node.stats();
     let shared = Arc::new(Mutex::new(Discovery::new(relay_addr)));
     let (socket, _) = discovery::bind(0).await.unwrap();
-    let reg = Registration { id: info.id, ip: info.ip, backend: info.backend, tcp_port: info.tcp_port };
+    let reg = Registration {
+        id,
+        ip,
+        backend: NodeBackend::Cpu,
+        tcp_port: listening.tcp_port,
+        quic_port: Some(listening.quic_port),
+    };
     tokio::spawn(discovery::run(socket, reg, shared.clone(), Duration::from_millis(200)));
-    tokio::spawn(async move {
-        loop {
-            let peer = node.accept_peer_connection().await.unwrap();
-            node.serve_peer(peer).await.unwrap();
-        }
-    });
 
     // A requester elsewhere on the network.
     let mut requester = Node::<2048>::with_id(UID::generate(), 0, 0, NodeBackend::Cpu, 1).await.unwrap();
+    requester.enable_quic(0, TOKEN).unwrap();
     let requester_id = requester.id;
     let peers = tokio::time::timeout(
         Duration::from_secs(10),
@@ -64,7 +72,14 @@ async fn joins_serves_and_shows_contributions() {
     .await
     .expect("requester finds us through the relay")
     .unwrap();
-    assert!(peers.iter().any(|p| p.id == info.id));
+    assert!(peers.iter().any(|p| p.id == info.id && p.quic_port == Some(info.quic_port)));
+
+    // A requester with another token can't get in, and doesn't fall back to TCP.
+    let mut stranger = Node::<2048>::with_id(UID::generate(), 0, 0, NodeBackend::Cpu, 1).await.unwrap();
+    stranger.enable_quic(0, b"not-the-token").unwrap();
+    let ours: Vec<_> = peers.iter().filter(|p| p.id == info.id).cloned().collect();
+    assert!(stranger.connect_to_peers(&ours).await.is_empty());
+
     assert_eq!(requester.connect_to_peers(&peers).await.len(), 1);
     let opts = ShardOptions { shards_per_peer: 4, ..ShardOptions::default() };
     let out = requester.run_sharded(selftest::task(2000), &opts).await.unwrap();
@@ -113,6 +128,8 @@ async fn joins_serves_and_shows_contributions() {
     let screen = render(&state);
     println!("{screen}");
     assert!(screen.contains("connected"), "{screen}");
+    assert!(screen.contains("auth token"), "{screen}");
+    assert!(screen.contains("tcp off"), "{screen}");
     assert!(screen.contains("for others 4 shards  0 failed"), "{screen}");
     assert!(screen.contains(&ui::id(requester_id)), "{screen}");
 }

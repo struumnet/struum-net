@@ -178,6 +178,7 @@ async fn udp_introductions_are_delivered() {
         role: NodeRole::NODE,
         backend: Some(NodeBackend::Cpu),
         tcp_port: Some(a.tcp_port),
+        quic_port: None,
     };
 
     a.send_udp_data(UdpPacket::INTRODUCTION(intro.clone()), local(b.udp_port))

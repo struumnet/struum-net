@@ -42,6 +42,12 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   their own tasks. Each peer's packets go over one bidirectional stream inside a
   `PeerConnection` (now transport-agnostic), so dispatch and `PeerServer` work over QUIC
   unchanged (`struum_node/tests/quic_sharding.rs`).
+- TUI over QUIC: `NodeDetails` / `IntroductionPacket` carry `quic_port` (a wire change, so all
+  nodes need the same build). `struum-tui` serves QUIC (`struum_tui::serving`), and with
+  `STRUUM_TOKEN` set it turns TCP off. The header shows `quic`, `tcp off` and `auth token|open`.
+  `Node::connect_to_peers` dials QUIC peers (endpoint started on first use, token from env) and
+  never falls back to TCP for them. Checked live: relay + TUI + `bench`; the right token runs the
+  job, a wrong one is rejected.
 
 ## Observations
 
@@ -82,4 +88,5 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   - Relay rewrite over QUIC: registry with expiry, `ListPeers`, `Connect`, `PunchRequest`.
   - Hole punching (LAN candidates first), then relay fallback (`Forward` streams).
   - `node.join(relay)` / `node.peers()`, wired into `struum_worker`, `struum-tui` and the examples.
+  - `struum_worker` still serves TCP only: give it the same QUIC serving as the TUI.
   - Then delete the TCP path.

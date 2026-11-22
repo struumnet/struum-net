@@ -171,6 +171,9 @@ pub struct IntroductionPacket {
     pub backend: Option<NodeBackend>,
     #[serde(default)]
     pub tcp_port: Option<u16>,
+    /// UDP port of the node's QUIC endpoint, if it serves over QUIC.
+    #[serde(default)]
+    pub quic_port: Option<u16>,
 }
 
 impl From<IntroductionPacket> for NodeDetails {
@@ -181,6 +184,7 @@ impl From<IntroductionPacket> for NodeDetails {
             role: packet.role,
             backend: packet.backend,
             tcp_port: packet.tcp_port,
+            quic_port: packet.quic_port,
         }
     }
 }
@@ -193,12 +197,20 @@ pub struct NodeDetails {
     pub backend: Option<NodeBackend>,
     #[serde(default)]
     pub tcp_port: Option<u16>,
+    /// UDP port of the node's QUIC endpoint, if it serves over QUIC.
+    #[serde(default)]
+    pub quic_port: Option<u16>,
 }
 
 impl NodeDetails {
     /// Returns the SocketAddr for reaching this node over TCP, if tcp_port is known.
     pub fn tcp_addr(&self) -> Option<SocketAddr> {
         self.tcp_port.map(|p| SocketAddr::new(self.ip.ip(), p))
+    }
+
+    /// Returns the SocketAddr of this node's QUIC endpoint, if it has one.
+    pub fn quic_addr(&self) -> Option<SocketAddr> {
+        self.quic_port.map(|p| SocketAddr::new(self.ip.ip(), p))
     }
 }
 
