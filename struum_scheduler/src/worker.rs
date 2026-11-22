@@ -65,6 +65,11 @@ pub(crate) async fn worker(state: Arc<Mutex<SchedulerState>>, tx: Sender<JobId>,
         });
 
         log::debug!("Worker finished job {id}");
+        if let Some(reply) = job.reply {
+            // The caller may have given up (e.g. timed out); nothing else wants the result.
+            let _ = reply.send(result);
+            continue;
+        }
 
         {
             let mut state = state.lock().await;

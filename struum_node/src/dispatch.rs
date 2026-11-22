@@ -12,6 +12,8 @@
 //! - Speculation: once the queue is empty, an idle peer re-runs the oldest shard
 //!   still out on another peer. The first result wins; the job returns without
 //!   waiting for the slower copy.
+//! - Joining peers: peers sent on the `joins` channel mid-job start pulling
+//!   from the same queue (and can take speculative copies).
 //! - `WORKERROR` (shader error, wasm trap, ...): deterministic, so the whole job fails.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -21,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::task::JoinSet;
 
 use crate::stats::NodeStats;
@@ -234,6 +236,7 @@ pub(crate) async fn run_sharded(
     sender_id: UID,
     work: Work,
     peers: Vec<PeerConnection>,
+    mut joins: Option<mpsc::UnboundedReceiver<PeerConnection>>,
     opts: &ShardOptions,
     stats: Option<&Arc<NodeStats>>,
 ) -> Result<(Work, ShardReport), StruumError> {
@@ -243,14 +246,15 @@ pub(crate) async fn run_sharded(
     if count == 0 {
         return Err(StruumError::ShardError("work has no items (is the work buffer set?)".to_string()));
     }
-    if peers.is_empty() {
+    if peers.is_empty() && joins.is_none() {
         return Err(StruumError::ShardError(format!(
             "no connected peers can run {:?} work",
             kind
         )));
     }
 
-    let ranges = split_ranges(count, peers.len() * opts.shards_per_peer.max(1));
+    // Shards are cut for the peers there at the start; ones joining later pull from the same queue.
+    let ranges = split_ranges(count, peers.len().max(1) * opts.shards_per_peer.max(1));
     let expected: Vec<usize> = ranges.iter().map(|r| r.len()).collect();
     // Keep each shard's request: results leave out unchanged buffers, restored from it.
     let payloads: Vec<ShardPayload> = ranges
@@ -320,7 +324,7 @@ pub(crate) async fn run_sharded(
             break;
         }
         tokio::select! {
-            joined = set.join_next() => match joined {
+            joined = set.join_next(), if !set.is_empty() || joins.is_none() => match joined {
                 None => break,
                 Some(Ok(Ok(()))) => {}
                 Some(Ok(Err(e))) => {
@@ -333,6 +337,14 @@ pub(crate) async fn run_sharded(
                 }
             },
             _ = &mut changed => {}
+            joined = async { joins.as_mut().expect("guarded").recv().await }, if joins.is_some() => match joined {
+                Some(peer) => {
+                    log::info!("Peer {} joined the job", peer.addr);
+                    let job = job.clone();
+                    set.spawn(async move { peer_loop(peer, &job).await });
+                }
+                None => joins = None,
+            },
         }
     }
     // Peers still running a losing copy keep reading its reply in the

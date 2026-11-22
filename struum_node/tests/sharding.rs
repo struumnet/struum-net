@@ -15,6 +15,19 @@ async fn spawn_worker(id: u64) -> NodeDetails {
     spawn_worker_with_cache(id, None).await
 }
 
+/// A real worker that serves each requester in its own task, as `struum_worker` does.
+async fn spawn_concurrent_worker(id: u64) -> NodeDetails {
+    let node = Node::<2048>::with_id(UID::new(id), 0, 0, NodeBackend::Cpu, 2).await.expect("worker node");
+    let details = node.details();
+    tokio::spawn(async move {
+        loop {
+            let peer = node.accept_peer().await.expect("accept");
+            tokio::spawn(node.server().serve(peer));
+        }
+    });
+    details
+}
+
 /// A real worker, optionally with a blob cache of `cache_bytes`.
 async fn spawn_worker_with_cache(id: u64, cache_bytes: Option<usize>) -> NodeDetails {
     let mut node = Node::<2048>::with_id(UID::new(id), 0, 0, NodeBackend::Cpu, 1)
@@ -355,4 +368,49 @@ async fn idle_peers_rerun_shards_stuck_on_a_slow_peer() {
     }
     // The slow peer's late replies were drained, not mistaken for the second job's.
     assert_eq!(node.node_count(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_worker_serves_two_requesters_at_once() {
+    let worker = spawn_concurrent_worker(100).await;
+    let mut a = requester(std::slice::from_ref(&worker)).await;
+    let mut b = requester(std::slice::from_ref(&worker)).await;
+    let opts = ShardOptions::default();
+    // Interleaved jobs: neither requester waits for the other to disconnect.
+    for _ in 0..3 {
+        let (ra, rb) = tokio::join!(
+            a.run_sharded(selftest::task(3_000), &opts),
+            b.run_sharded(task_with_weights(2_000, 4.0), &opts)
+        );
+        let y = |w: struum_node::Work| w.into_cpu_task().unwrap().get_buffer("y").unwrap().as_slice::<f32>().to_vec();
+        assert_eq!(y(ra.unwrap()), selftest::expected(3_000));
+        assert_eq!(y(rb.unwrap()), selftest::expected(2_000));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_joining_mid_job_takes_shards() {
+    let delay = Duration::from_millis(1_500);
+    let slow = spawn_slow(110, delay).await;
+    let fast = spawn_worker(111).await;
+    let mut node = requester(std::slice::from_ref(&slow)).await;
+
+    let (joins, rx) = tokio::sync::mpsc::unbounded_channel();
+    let fast_addr = fast.tcp_addr().unwrap();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let peer = struum_network::layer::PeerConnection::connect(fast_addr).await.unwrap();
+        joins.send(peer).unwrap();
+    });
+
+    let opts = ShardOptions { shards_per_peer: 6, ..ShardOptions::default() };
+    let n = 6_000;
+    let (out, report) = node.run_sharded_with_joins(selftest::task(n), rx, &opts).await.unwrap();
+    assert_eq!(
+        out.into_cpu_task().unwrap().get_buffer("y").unwrap().as_slice::<f32>(),
+        selftest::expected(n).as_slice()
+    );
+    let by_fast = report.completed_by.get(&fast_addr).copied().unwrap_or(0);
+    assert!(by_fast >= 4, "the joiner should take the queued shards: {report:?}");
+    assert!(report.elapsed < delay * 3, "{report:?}");
 }

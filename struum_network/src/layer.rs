@@ -269,6 +269,18 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         Ok(peer_addr)
     }
 
+    /// Accepts the next incoming connection and hands it to the caller without
+    /// keeping it in the pool, so a serving task can own it outright.
+    pub async fn accept_peer(&self) -> Result<PeerConnection, StruumError> {
+        let (stream, peer_addr) = self
+            .tcp_listener
+            .accept()
+            .await
+            .map_err(|e| NetworkConnectionError(format!("Failed to accept TCP connection: {}", e)))?;
+        log::info!("Accepted TCP connection from {}", peer_addr);
+        Ok(PeerConnection::from_stream(stream, peer_addr))
+    }
+
     /// Reads a length-prefixed TcpPacket from an established connection.
     pub async fn recv_tcp_data(
         &mut self,
@@ -337,6 +349,26 @@ impl Drop for OpGuard<'_> {
 }
 
 impl PeerConnection {
+    fn from_stream(stream: TcpStream, addr: SocketAddr) -> Self {
+        tune_stream(&stream);
+        let conn = Connection::new(stream);
+        Self {
+            addr,
+            reader: conn.reader,
+            writer: conn.writer,
+            known_blobs: conn.known_blobs,
+            broken: conn.broken,
+        }
+    }
+
+    /// Opens a connection to `addr` outside any [`NetworkLayer`] pool.
+    pub async fn connect(addr: SocketAddr) -> Result<Self, StruumError> {
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|e| NetworkConnectionError(format!("Failed to connect to {}: {}", addr, e)))?;
+        Ok(Self::from_stream(stream, addr))
+    }
+
     /// Locks the set of blob hashes the peer is believed to hold.
     pub fn known_blobs(&self) -> std::sync::MutexGuard<'_, HashSet<u64>> {
         self.known_blobs.lock().unwrap_or_else(|e| e.into_inner())

@@ -91,12 +91,10 @@ async fn main() -> Result<(), StruumError> {
     tokio::spawn(discovery::run(socket, reg, shared.clone(), REGISTER_EVERY));
     tokio::spawn(async move {
         loop {
-            match node.accept_peer_connection().await {
+            match node.accept_peer().await {
                 Ok(peer) => {
-                    log::info!("Serving requester {peer}");
-                    if let Err(e) = node.serve_peer(peer).await {
-                        log::warn!("Requester {peer}: {e}");
-                    }
+                    log::info!("Serving requester {}", peer.addr);
+                    tokio::spawn(node.server().serve(peer));
                 }
                 Err(e) => {
                     log::warn!("Accept failed: {e}");

@@ -30,6 +30,12 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   gradient matches a local computation, so training is the same locally or across devices.
 - Example: distributed path-traced render (`examples/render.rs`), deterministic however it's split.
 
+- Concurrent serving: `Node::server()` gives a cloneable `PeerServer`, and `struum_worker` and
+  `struum-tui` serve each requester in its own task. `JobScheduler::run` waits on a per-job
+  reply, so nothing has to drain the completion channel.
+- Peers joining mid-job: `Node::run_sharded_with_joins` takes a channel of new
+  `PeerConnection`s (`PeerConnection::connect`). Each starts pulling from the job's queue.
+
 ## Observations
 
 - MNIST training is communication-bound: weights and gradients are shipped every step, so slow

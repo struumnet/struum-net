@@ -6,8 +6,8 @@
 //! (wasm) or GPU (OpenGL).
 //!
 //! - **As a worker**, it registers with a relay, accepts connections
-//!   ([`Node::accept_peer_connection`]) and runs whatever its peers send
-//!   ([`Node::serve_peer`]).
+//!   ([`Node::accept_peer`]) and runs whatever its peers send ([`PeerServer::serve`]),
+//!   serving several requesters at once.
 //! - **As a requester**, it discovers workers ([`Node::discover_peers`]), connects to them
 //!   ([`Node::connect_to_peers`]) and runs jobs across them with [`Node::run_sharded`].
 //!
@@ -45,7 +45,7 @@ pub mod node;
 pub mod stats;
 
 pub use dispatch::{ShardOptions, ShardReport};
-pub use node::{Coordinator, Node};
+pub use node::{Coordinator, Node, PeerServer};
 pub use stats::{NodeStats, PeerTally, StatsSnapshot, Tally};
 pub use struum_cpu::CpuTask;
 pub use struum_scheduler::Work;
