@@ -7,7 +7,8 @@
 //!
 //! - **As a worker**, it registers with a relay, accepts connections
 //!   ([`Node::accept_peer`]) and runs whatever its peers send ([`PeerServer::serve`]),
-//!   serving several requesters at once.
+//!   serving several requesters at once. [`serving`] does this over QUIC (and TCP
+//!   when no token is set).
 //! - **As a requester**, it discovers workers ([`Node::discover_peers`]), connects to them
 //!   ([`Node::connect_to_peers`]) and runs jobs across them with [`Node::run_sharded`].
 //!
@@ -42,6 +43,7 @@
 
 pub mod dispatch;
 pub mod node;
+pub mod serving;
 pub mod stats;
 
 pub use dispatch::{ShardOptions, ShardReport};

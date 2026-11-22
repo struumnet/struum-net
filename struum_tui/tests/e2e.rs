@@ -12,7 +12,8 @@ use struum_node::{Node, ShardOptions};
 use struum_relay::RelayServer;
 use struum_tui::app::{AppState, History, NodeInfo, SortKey, neighbour_rows};
 use struum_tui::discovery::{self, Discovery, RelayStatus, Registration};
-use struum_tui::{serving, ui};
+use struum_node::serving;
+use struum_tui::ui;
 
 const TOKEN: &[u8] = b"e2e-token";
 use struum_types::network::{NodeBackend, UID};

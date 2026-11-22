@@ -14,10 +14,13 @@ cargo run --example requester                      # 3. requester
 ```
 
 Worker env: `RELAY_ADDR`, `NODE_ID` (random), `NODE_UDP_PORT` (34255), `NODE_TCP_PORT` (34265),
-`WORKER_BACKEND=cpu|opengl`, `RUST_LOG`. On startup the worker self-tests CPU and GPU and advertises
-`Cpu` only if the GPU is unavailable.
+`NODE_QUIC_PORT` (34275), `STRUUM_TOKEN`, `WORKER_BACKEND=cpu|opengl`, `RUST_LOG`. On startup the
+worker self-tests CPU and GPU and advertises `Cpu` only if the GPU is unavailable. It serves QUIC
+like the TUI (below): with `STRUUM_TOKEN` set, only requesters with the same token get in and TCP
+is off (and not advertised to the relay).
 
-To run several workers on one machine, give each its own `NODE_ID`, `NODE_UDP_PORT` and `NODE_TCP_PORT`.
+To run several workers on one machine, give each its own `NODE_ID`, `NODE_UDP_PORT`,
+`NODE_TCP_PORT` and `NODE_QUIC_PORT`.
 
 ## TUI
 
@@ -115,8 +118,9 @@ Set `RELAY_ADDR=<pc-lan-ip>:39001` on requesters when workers are on other devic
 `struum_network::quic::QuicLayer` is one UDP socket that accepts and dials over QUIC (TLS 1.3).
 Nodes must share `STRUUM_TOKEN`: on connect, each side proves it knows the token with an HMAC over
 both TLS certificates, so peers without it are refused. Without a token, any struum node can
-connect. Peers run the same `PeerConnection` protocol as TCP. `struum-tui` serves over it and
-requesters dial it. `struum_worker` and the relay still use TCP/UDP; see AGENTS.md.
+connect. Peers run the same `PeerConnection` protocol as TCP. `struum_worker` and `struum-tui`
+serve over it (`struum_node::serving`) and requesters dial it. The relay still uses UDP; see
+AGENTS.md.
 
 ## Tests
 

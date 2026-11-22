@@ -48,6 +48,9 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   `Node::connect_to_peers` dials QUIC peers (endpoint started on first use, token from env) and
   never falls back to TCP for them. Checked live: relay + TUI + `bench`; the right token runs the
   job, a wrong one is rejected.
+- `struum_worker` serves QUIC too: the TUI's serving code moved to `struum_node::serving`
+  (`prepare` enables QUIC, `spawn` serves; `start` does both). With a token, `Node::details()`
+  and relay introductions leave the TCP port out (`Node::set_advertise_tcp`).
 
 ## Observations
 
@@ -88,5 +91,4 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
   - Relay rewrite over QUIC: registry with expiry, `ListPeers`, `Connect`, `PunchRequest`.
   - Hole punching (LAN candidates first), then relay fallback (`Forward` streams).
   - `node.join(relay)` / `node.peers()`, wired into `struum_worker`, `struum-tui` and the examples.
-  - `struum_worker` still serves TCP only: give it the same QUIC serving as the TUI.
   - Then delete the TCP path.

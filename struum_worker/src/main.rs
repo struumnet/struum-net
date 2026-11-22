@@ -1,6 +1,7 @@
 //! Standalone struum worker.
 //!
-//! Registers with a relay, accepts TCP connections from requesters, and runs the
+//! Registers with a relay, accepts requesters over QUIC (and TCP when no token
+//! is set, see `struum_node::serving`), and runs the
 //! work they send: GPU kernels (OpenGL) and CPU tasks (WebAssembly), including
 //! shards of larger jobs. Builds for desktop (glfw + OpenGL 4.3) and for Android
 //! (headless EGL + OpenGL ES 3.1), see README "Android worker".
@@ -10,6 +11,9 @@
 //! - `NODE_ID`       numeric node id (default: random)
 //! - `NODE_UDP_PORT` UDP port (default 34255)
 //! - `NODE_TCP_PORT` TCP port (default 34265)
+//! - `NODE_QUIC_PORT` QUIC (UDP) port (default 34275)
+//! - `STRUUM_TOKEN`  shared secret requesters must prove they know; with it set,
+//!                   TCP is off and only QUIC is served
 //! - `WORKER_BACKEND` `opengl` or `cpu` (default: `opengl` if the GPU self-test passes)
 //! - `RUST_LOG`      log filter (default `info`)
 
@@ -19,6 +23,7 @@ use std::time::Duration;
 use struum_cpu::selftest;
 use struum_kernel::Kernel;
 use struum_node::node::Node;
+use struum_node::serving;
 use struum_types::network::{NodeBackend, UID};
 use struum_types::{Buffer, StruumError};
 
@@ -34,6 +39,7 @@ async fn main() -> Result<(), StruumError> {
 
     let udp_port: u16 = env_or("NODE_UDP_PORT", 34255);
     let tcp_port: u16 = env_or("NODE_TCP_PORT", 34265);
+    let quic_port: u16 = env_or("NODE_QUIC_PORT", 34275);
     let relay_addr: SocketAddr = std::env::var("RELAY_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:39001".to_string())
         .parse()
@@ -78,14 +84,22 @@ async fn main() -> Result<(), StruumError> {
     };
     log::info!("Advertising backend {:?} (CPU tasks always accepted)", node.backend);
 
+    let token = struum_network::quic::token_from_env();
+    let listening = serving::prepare(&mut node, quic_port, &token)?;
+    log::info!(
+        "Serving QUIC on UDP {}, TCP {}, auth {}",
+        listening.quic_port,
+        listening.tcp_port.map_or("off".to_string(), |p| p.to_string()),
+        if listening.authenticated { "token" } else { "open" }
+    );
+
+    // Registers the QUIC port (and TCP only if it's on) with the relay.
     let _peer = node.long_poll_relay(relay_addr).await?;
 
     // Each requester gets its own task; they share this node's workers.
-    loop {
-        let peer = node.accept_peer().await?;
-        log::info!("Serving requester at {}", peer.addr);
-        tokio::spawn(node.server().serve(peer));
-    }
+    serving::spawn(node, listening);
+    std::future::pending::<()>().await;
+    Ok(())
 }
 
 /// Runs the built-in WebAssembly task through the local scheduler.

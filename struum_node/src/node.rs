@@ -115,6 +115,9 @@ pub struct Node<const BUF_SIZE: usize> {
     quic: Option<Arc<QuicLayer>>,
     /// Authenticated QUIC connections to peers, by the peer's advertised QUIC address.
     quic_peers: HashMap<SocketAddr, QuicPeer>,
+    /// Whether [`Node::details`] (what the relay tells requesters) includes the
+    /// TCP port. Off when TCP isn't served, e.g. because a token is set.
+    advertise_tcp: bool,
 }
 
 impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
@@ -173,6 +176,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             blob_cache_bytes: BlobStore::env_limit_bytes(),
             quic: None,
             quic_peers: HashMap::new(),
+            advertise_tcp: true,
         })
     }
 
@@ -231,6 +235,12 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         log::info!("Node {} serving QUIC on UDP {}", self.id, port);
         self.quic = Some(Arc::new(layer));
         Ok(port)
+    }
+
+    /// Stops (or resumes) advertising the TCP port to the relay. Turn it off
+    /// when this node won't accept TCP, so requesters don't try it.
+    pub fn set_advertise_tcp(&mut self, on: bool) {
+        self.advertise_tcp = on;
     }
 
     /// The QUIC endpoint, if enabled: accept requesters with `quic().accept()`
@@ -745,7 +755,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             ip: SocketAddr::new(self.net.ip, self.net.udp_port),
             role: NodeRole::NODE,
             backend: Some(self.backend),
-            tcp_port: Some(self.net.tcp_port),
+            tcp_port: self.advertise_tcp.then_some(self.net.tcp_port),
             quic_port: self.quic_port(),
         }
     }
@@ -890,7 +900,7 @@ impl<const BUF_SIZE: usize> NetworkCommunicator for Node<BUF_SIZE> {
                     ip: SocketAddr::new(self.net.ip, self.net.udp_port),
                     role: NodeRole::NODE,
                     backend: Some(self.backend),
-                    tcp_port: Some(self.net.tcp_port),
+                    tcp_port: self.advertise_tcp.then_some(self.net.tcp_port),
                     quic_port: self.quic_port(),
                 }),
                 ip,

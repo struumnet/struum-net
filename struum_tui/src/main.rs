@@ -16,7 +16,8 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use struum_node::Node;
 use struum_tui::app::{AppState, History, NodeInfo, SortKey, neighbour_rows};
 use struum_tui::discovery::{self, Discovery, Registration};
-use struum_tui::{logger, selftest, serving, ui};
+use struum_node::serving;
+use struum_tui::{logger, selftest, ui};
 use struum_types::StruumError;
 use struum_types::network::{NodeBackend, UID};
 

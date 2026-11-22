@@ -2568,6 +2568,7 @@ dependencies = [
  "log",
  "struum_cpu",
  "struum_kernel",
+ "struum_network",
  "struum_node",
  "struum_opengl",
  "struum_types",
