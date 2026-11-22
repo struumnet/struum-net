@@ -51,6 +51,11 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
 - `struum_worker` serves QUIC too: the TUI's serving code moved to `struum_node::serving`
   (`prepare` enables QUIC, `spawn` serves; `start` does both). With a token, `Node::details()`
   and relay introductions leave the TCP port out (`Node::set_advertise_tcp`).
+- Relay registry with expiry (UDP relay, ahead of the QUIC rewrite): registrations last
+  `RELAY_TTL_SECS` (default 30 s, `RelayServer::with_ttl`). A refresh with unchanged details only
+  re-sends the registry to that node; new or changed nodes are announced to everyone, and a failed
+  send no longer stops the fan-out. `serving::spawn` re-registers every `serving::HEARTBEAT` (10 s)
+  if the node registered with a relay, so `struum_worker` stays listed.
 
 ## Observations
 
@@ -88,7 +93,8 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
 - Measure pipelining and speculation on real devices (desktop plus a phone on Wi-Fi) with
   `RELAY_ADDR=... cargo run --release --example bench`.
 - WAN plan, phase 2 (on `feat/wan-quic-transport`):
-  - Relay rewrite over QUIC: registry with expiry, `ListPeers`, `Connect`, `PunchRequest`.
+  - Relay rewrite over QUIC: `ListPeers`, `Connect`, `PunchRequest` (registry expiry is done
+    on the UDP relay and carries over).
   - Hole punching (LAN candidates first), then relay fallback (`Forward` streams).
   - `node.join(relay)` / `node.peers()`, wired into `struum_worker`, `struum-tui` and the examples.
   - Then delete the TCP path.

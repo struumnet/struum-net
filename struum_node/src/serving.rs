@@ -13,8 +13,14 @@
 use std::time::Duration;
 
 use struum_types::StruumError;
+use struum_types::network::NetworkCommunicator;
 
 use crate::Node;
+
+/// How often a serving node that registered with a relay
+/// ([`Node::long_poll_relay`]) registers again, so the relay doesn't expire it
+/// (`struum_relay::DEFAULT_TTL` is 30 s).
+pub const HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// How requesters can reach this node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,11 +55,17 @@ pub fn start<const N: usize>(mut node: Node<N>, quic_port: u16, token: &[u8]) ->
 
 /// Serves requesters on a node set up by [`prepare`]: every QUIC peer, and
 /// TCP ones if `listening.tcp_port` is set. Takes the node: from here on it
-/// only serves.
+/// only serves. If the node registered with a relay, it re-registers every
+/// [`HEARTBEAT`].
 ///
 /// # Panics
 /// If QUIC isn't enabled on `node`.
 pub fn spawn<const N: usize>(node: Node<N>, listening: Listening) {
+    spawn_with_heartbeat(node, listening, HEARTBEAT);
+}
+
+/// [`spawn`] re-registering with the relay every `heartbeat`.
+pub fn spawn_with_heartbeat<const N: usize>(node: Node<N>, listening: Listening, heartbeat: Duration) {
     let quic = node.quic().expect("serving::spawn needs QUIC enabled (serving::prepare)");
     let server = node.server();
 
@@ -76,22 +88,36 @@ pub fn spawn<const N: usize>(node: Node<N>, listening: Listening) {
         }
     });
 
-    // This task also keeps the node (its TCP listener and scheduler) alive.
+    // This task also keeps the node (its TCP listener and scheduler) alive,
+    // and keeps it registered with the relay it registered with.
     tokio::spawn(async move {
-        if listening.tcp_port.is_none() {
+        let mut node = node;
+        let tcp_on = listening.tcp_port.is_some();
+        if !tcp_on {
             log::info!("TCP is off: requesters must use QUIC");
-            std::future::pending::<()>().await;
         }
+        let relay = node.relay_addr;
+        let mut beat = tokio::time::interval(heartbeat);
+        beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            match node.accept_peer().await {
-                Ok(peer) => {
-                    log::info!("Serving requester {} over TCP", peer.addr);
-                    tokio::spawn(node.server().serve(peer));
+            tokio::select! {
+                res = node.accept_peer(), if tcp_on => match res {
+                    Ok(peer) => {
+                        log::info!("Serving requester {} over TCP", peer.addr);
+                        tokio::spawn(node.server().serve(peer));
+                    }
+                    Err(e) => {
+                        log::warn!("Accept failed: {e}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                },
+                _ = beat.tick(), if relay.is_some() => {
+                    let relay = relay.expect("checked by the guard");
+                    if let Err(e) = node.introduce(relay).await {
+                        log::debug!("Relay heartbeat to {relay} failed: {e}");
+                    }
                 }
-                Err(e) => {
-                    log::warn!("Accept failed: {e}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+                else => std::future::pending::<()>().await,
             }
         }
     });

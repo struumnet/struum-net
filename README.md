@@ -22,6 +22,10 @@ is off (and not advertised to the relay).
 To run several workers on one machine, give each its own `NODE_ID`, `NODE_UDP_PORT`,
 `NODE_TCP_PORT` and `NODE_QUIC_PORT`.
 
+Relay env: `RELAY_UDP_PORT` (39001), `RELAY_TCP_PORT` (39002), `RELAY_TTL_SECS` (30). A node the
+relay hasn't heard from within the TTL is dropped and no longer introduced; workers re-register
+every 10 s while serving and the TUI every 2 s.
+
 ## TUI
 
 `struum-tui` joins a network as a worker (like `struum_worker`) and shows it live: your

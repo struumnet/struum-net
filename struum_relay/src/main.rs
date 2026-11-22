@@ -1,4 +1,4 @@
-use struum_relay::RelayServer;
+use struum_relay::{RelayServer, ttl_from_env};
 use struum_types::StruumError;
 
 #[tokio::main]
@@ -16,7 +16,7 @@ async fn main() -> Result<(), StruumError> {
         .unwrap_or(39002);
 
     println!("Starting struum_relay server on UDP: {} / TCP: {}", udp_port, tcp_port);
-    let mut relay = RelayServer::<2048>::new(udp_port, tcp_port).await?;
+    let mut relay = RelayServer::<2048>::new(udp_port, tcp_port).await?.with_ttl(ttl_from_env());
 
     println!("struum_relay is running and waiting for node registrations...");
     relay.run().await

@@ -114,3 +114,60 @@ async fn garbage_registration_is_an_error_and_registers_nothing() {
     assert!(timeout(WAIT, relay.listen_and_relay_once()).await.unwrap().is_err());
     assert_eq!(relay.registered_count(), 0);
 }
+
+/// Asserts nothing arrives at `node` for a moment.
+async fn assert_silent(node: &mut TestNode) {
+    let got = timeout(Duration::from_millis(200), node.net.listen_udp::<IntroductionPacket>()).await;
+    assert!(got.is_err(), "unexpected introduction: {got:?}");
+}
+
+#[tokio::test]
+async fn refreshes_are_not_announced_but_changes_are() {
+    let mut relay = relay().await;
+    let mut a = TestNode::new().await;
+    let mut b = TestNode::new().await;
+    for node in [&mut a, &mut b] {
+        node.register(relay.net.udp_port).await;
+        timeout(WAIT, relay.listen_and_relay_once()).await.unwrap().unwrap();
+    }
+    assert_eq!(a.next_intro().await.id, b.id);
+    assert_eq!(b.next_intro().await.id, a.id);
+
+    // Same details again: a gets the registry again, b hears nothing.
+    a.register(relay.net.udp_port).await;
+    timeout(WAIT, relay.listen_and_relay_once()).await.unwrap().unwrap();
+    assert_eq!(a.next_intro().await.id, b.id);
+    assert_silent(&mut b).await;
+
+    // a now serves QUIC: b is told.
+    let intro = IntroductionPacket {
+        id: a.id,
+        ip: SocketAddr::from(([0, 0, 0, 0], a.net.udp_port)),
+        role: NodeRole::NODE,
+        backend: Some(NodeBackend::Cpu),
+        tcp_port: None,
+        quic_port: Some(4433),
+    };
+    a.net.send_udp_data(UdpPacket::INTRODUCTION(intro), local(relay.net.udp_port)).await.unwrap();
+    timeout(WAIT, relay.listen_and_relay_once()).await.unwrap().unwrap();
+    let b_learns = b.next_intro().await;
+    assert_eq!((b_learns.id, b_learns.tcp_port, b_learns.quic_port), (a.id, None, Some(4433)));
+}
+
+#[tokio::test]
+async fn registrations_expire_without_a_refresh() {
+    let mut relay = relay().await.with_ttl(Duration::from_millis(300));
+    let mut gone = TestNode::new().await;
+    let mut live = TestNode::new().await;
+
+    gone.register(relay.net.udp_port).await;
+    timeout(WAIT, relay.listen_and_relay_once()).await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    live.register(relay.net.udp_port).await;
+    timeout(WAIT, relay.listen_and_relay_once()).await.unwrap().unwrap();
+    assert_eq!(relay.registered_count(), 1, "the stale node was dropped");
+    assert!(relay.get_node(&gone.id).is_none());
+    assert_silent(&mut live).await;
+    assert_silent(&mut gone).await;
+}
