@@ -104,11 +104,20 @@ Other examples: `linear_model`, `kernel_test`, `scheduler_test`, `relay_nodes`, 
 
 Set `RELAY_ADDR=<pc-lan-ip>:39001` on requesters when workers are on other devices.
 
+## QUIC transport (in progress)
+
+`struum_network::quic::QuicLayer` is one UDP socket that accepts and dials over QUIC (TLS 1.3).
+Nodes must share `STRUUM_TOKEN`: on connect, each side proves it knows the token with an HMAC over
+both TLS certificates, so peers without it are refused. Without a token, any struum node can
+connect. Peers run the same `PeerConnection` protocol as TCP. Workers and the relay don't use it
+yet; see AGENTS.md.
+
 ## Tests
 
 ```bash
 scripts/test.sh                    # whole workspace, host target only
 scripts/test.sh -p struum_network  # one crate
+scripts/test.sh --workspace -j4    # extra flags: also pass --workspace
 ```
 
 GL tests use the glfw backend; set `STRUUM_TEST_GL=egl` to run them on headless EGL instead.

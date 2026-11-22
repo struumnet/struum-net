@@ -12,7 +12,6 @@ use struum_types::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -61,20 +60,26 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
 }
 
 /// One live TCP connection plus what we know about the peer on the other end.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Connection {
-    reader: Arc<Mutex<OwnedReadHalf>>,
-    writer: Arc<Mutex<OwnedWriteHalf>>,
+    reader: Arc<Mutex<BoxReader>>,
+    writer: Arc<Mutex<BoxWriter>>,
     known_blobs: Arc<std::sync::Mutex<HashSet<u64>>>,
     broken: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connection").field("broken", &self.broken).finish()
+    }
 }
 
 impl Connection {
     fn new(stream: TcpStream) -> Self {
         let (reader, writer) = stream.into_split();
         Self {
-            reader: Arc::new(Mutex::new(reader)),
-            writer: Arc::new(Mutex::new(writer)),
+            reader: Arc::new(Mutex::new(Box::new(reader))),
+            writer: Arc::new(Mutex::new(Box::new(writer))),
             known_blobs: Arc::default(),
             broken: Arc::default(),
         }
@@ -246,6 +251,7 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             writer: conn.writer.clone(),
             known_blobs: conn.known_blobs.clone(),
             broken: conn.broken.clone(),
+            _keep_alive: None,
         })
     }
 
@@ -303,22 +309,35 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
 /// A read or write that fails or is cancelled part-way leaves the stream out of
 /// step with the peer. The connection is then marked broken, and every later
 /// read or write on it fails at once instead of misreading the stream.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PeerConnection {
     pub addr: SocketAddr,
-    reader: Arc<Mutex<OwnedReadHalf>>,
-    writer: Arc<Mutex<OwnedWriteHalf>>,
+    reader: Arc<Mutex<BoxReader>>,
+    writer: Arc<Mutex<BoxWriter>>,
     /// Content hashes of blobs the peer is believed to hold for this connection
     /// (see `TcpPacket::WORKREF`). Shared by every handle to the connection and
     /// reset when it is replaced.
     known_blobs: Arc<std::sync::Mutex<HashSet<u64>>>,
     broken: Arc<AtomicBool>,
+    _keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
+
+impl std::fmt::Debug for PeerConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerConnection")
+            .field("addr", &self.addr)
+            .field("broken", &self.is_broken())
+            .finish()
+    }
+}
+
+type BoxReader = Box<dyn AsyncRead + Send + Unpin>;
+type BoxWriter = Box<dyn AsyncWrite + Send + Unpin>;
 
 /// Exclusive use of a connection's read half; see [`PeerConnection::reader`].
 pub struct PeerReader<'a> {
     conn: &'a PeerConnection,
-    half: MutexGuard<'a, OwnedReadHalf>,
+    half: MutexGuard<'a, BoxReader>,
 }
 
 impl PeerReader<'_> {
@@ -349,6 +368,25 @@ impl Drop for OpGuard<'_> {
 }
 
 impl PeerConnection {
+    /// A connection over any ordered byte stream (e.g. one QUIC stream), with
+    /// the same framing as TCP. `keep_alive` is held for as long as any handle
+    /// exists, e.g. the QUIC connection the stream belongs to.
+    pub fn from_halves(
+        addr: SocketAddr,
+        reader: impl AsyncRead + Send + Unpin + 'static,
+        writer: impl AsyncWrite + Send + Unpin + 'static,
+        keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Self {
+        Self {
+            addr,
+            reader: Arc::new(Mutex::new(Box::new(reader))),
+            writer: Arc::new(Mutex::new(Box::new(writer))),
+            known_blobs: Arc::default(),
+            broken: Arc::default(),
+            _keep_alive: keep_alive,
+        }
+    }
+
     fn from_stream(stream: TcpStream, addr: SocketAddr) -> Self {
         tune_stream(&stream);
         let conn = Connection::new(stream);
@@ -358,6 +396,7 @@ impl PeerConnection {
             writer: conn.writer,
             known_blobs: conn.known_blobs,
             broken: conn.broken,
+            _keep_alive: None,
         }
     }
 

@@ -36,6 +36,13 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
 - Peers joining mid-job: `Node::run_sharded_with_joins` takes a channel of new
   `PeerConnection`s (`PeerConnection::connect`). Each starts pulling from the job's queue.
 
+- QUIC transport (`struum_network::quic`): `QuicLayer` accepts and dials on one UDP socket with
+  per-node self-signed certificates. Token auth: a `Hello` carries
+  `HMAC-SHA256(STRUUM_TOKEN, id ‖ own cert fp ‖ peer cert fp)` each way. Handshakes run in
+  their own tasks. Each peer's packets go over one bidirectional stream inside a
+  `PeerConnection` (now transport-agnostic), so dispatch and `PeerServer` work over QUIC
+  unchanged (`struum_node/tests/quic_sharding.rs`).
+
 ## Observations
 
 - MNIST training is communication-bound: weights and gradients are shipped every step, so slow
@@ -71,4 +78,8 @@ Progress and status notes for struum-net. Build, run and contributing docs live 
 
 - Measure pipelining and speculation on real devices (desktop plus a phone on Wi-Fi) with
   `RELAY_ADDR=... cargo run --release --example bench`.
-- WAN: QUIC transport, hole punching with relay fallback, token auth (plan on `feat/wan-quic-transport`).
+- WAN plan, phase 2 (on `feat/wan-quic-transport`):
+  - Relay rewrite over QUIC: registry with expiry, `ListPeers`, `Connect`, `PunchRequest`.
+  - Hole punching (LAN candidates first), then relay fallback (`Forward` streams).
+  - `node.join(relay)` / `node.peers()`, wired into `struum_worker`, `struum-tui` and the examples.
+  - Then delete the TCP path.
