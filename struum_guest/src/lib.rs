@@ -79,6 +79,7 @@ impl TaskContext {
         self.len as usize
     }
 
+    /// Whether this piece has no work items.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

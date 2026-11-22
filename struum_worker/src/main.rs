@@ -80,10 +80,11 @@ async fn main() -> Result<(), StruumError> {
 
     let _peer = node.long_poll_relay(relay_addr).await?;
 
+    // Each requester gets its own task; they share this node's workers.
     loop {
-        let peer_conn_addr = node.accept_peer_connection().await?;
-        log::info!("Serving requester at {}", peer_conn_addr);
-        node.serve_peer(peer_conn_addr).await?;
+        let peer = node.accept_peer().await?;
+        log::info!("Serving requester at {}", peer.addr);
+        tokio::spawn(node.server().serve(peer));
     }
 }
 

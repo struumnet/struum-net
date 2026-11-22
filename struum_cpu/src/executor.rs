@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +9,7 @@ use std::time::Duration;
 
 use wasmtime::{Config, Engine, Instance, Linker, Module, Store, Trap};
 
-use struum_types::{Shardable, StruumError, split_ranges};
+use struum_types::{Buffer, ShardMode, Shardable, StruumError, split_ranges};
 
 use crate::CpuTask;
 
@@ -39,6 +40,7 @@ impl CpuExecutor {
         Self::with_options(threads, Duration::from_secs(300))
     }
 
+    /// Uses `threads` OS threads per task and interrupts tasks running longer than `timeout`.
     pub fn with_options(threads: usize, timeout: Duration) -> Result<Self, StruumError> {
         let mut config = Config::new();
         config.epoch_interruption(true);
@@ -69,6 +71,13 @@ impl CpuExecutor {
     }
 
     /// Executes `task`, splitting it across this executor's threads.
+    ///
+    /// Results are the same as sharding the task with [`Shardable::shard`], running
+    /// each piece and merging with [`Shardable::merge`], but buffers are written into
+    /// each instance straight from `task` instead of being cloned per piece, and only
+    /// what the merge keeps is read back (split slices, `SumF32` accumulators, and
+    /// broadcast buffers from the first piece only). Large broadcast buffers would
+    /// otherwise be copied several times per thread.
     pub fn execute(&self, task: CpuTask) -> Result<CpuTask, StruumError> {
         let module = self.module(task.module())?;
         let count = task.work_count();
@@ -76,21 +85,33 @@ impl CpuExecutor {
 
         if ranges.len() <= 1 {
             let mut task = task;
-            self.run_instance(&module, &mut task)?;
+            let inputs: Vec<Input> = task
+                .buffers()
+                .iter()
+                .map(|b| Input { data: Data::Bytes(&b.buffer.data), stride: b.buffer.stride })
+                .collect();
+            let mut out: Vec<Option<Vec<u8>>> = vec![None; inputs.len()];
+            self.run_raw(&module, task.entry(), task.offset() as u32, count, &inputs, |i, bytes| {
+                out[i] = Some(bytes.to_vec());
+            })?;
+            for (b, data) in task.buffers_mut().iter_mut().zip(out) {
+                b.buffer.data = data.expect("every buffer read back");
+            }
             return Ok(task);
         }
 
-        let mut pieces = ranges
-            .into_iter()
-            .map(|r| task.shard(r))
-            .collect::<Result<Vec<_>, _>>()?;
+        let modes = task.resolved_modes();
+        for (b, mode) in task.buffers().iter().zip(&modes) {
+            check_piece_input(&b.buffer, *mode, count)?;
+        }
 
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = pieces
-                .iter_mut()
-                .map(|piece| {
-                    let module = &module;
-                    scope.spawn(move || self.run_instance(module, piece))
+        let pieces: Vec<Vec<Option<Vec<u8>>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = ranges
+                .iter()
+                .enumerate()
+                .map(|(piece, range)| {
+                    let (module, task, modes) = (&module, &task, &modes);
+                    scope.spawn(move || self.run_piece(module, task, modes, piece, range.clone()))
                 })
                 .collect();
             handles
@@ -99,7 +120,69 @@ impl CpuExecutor {
                 .collect::<Result<Vec<_>, _>>()
         })?;
 
-        CpuTask::merge(pieces)
+        // Merge exactly like `merge_buffers`: concatenate splits in range order, keep the
+        // first piece's broadcast copy, sum `SumF32` pieces in order starting from 0.0.
+        let mut task = task;
+        for (i, (b, mode)) in task.buffers_mut().iter_mut().zip(&modes).enumerate() {
+            let stride = b.buffer.stride;
+            match mode {
+                ShardMode::Split => {
+                    for (range, piece) in ranges.iter().zip(&pieces) {
+                        let bytes = piece[i].as_deref().expect("split buffer read back");
+                        b.buffer.data[range.start * stride..range.end * stride].copy_from_slice(bytes);
+                    }
+                }
+                ShardMode::Broadcast => {
+                    b.buffer.data = pieces[0][i].clone().expect("first piece reads broadcast buffers");
+                }
+                ShardMode::SumF32 => {
+                    let mut acc = vec![0.0f32; b.buffer.data.len() / 4];
+                    for piece in &pieces {
+                        let bytes = piece[i].as_deref().expect("sum buffer read back");
+                        for (a, chunk) in acc.iter_mut().zip(bytes.chunks_exact(4)) {
+                            *a += f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        }
+                    }
+                    b.buffer.data = acc.iter().flat_map(|v| v.to_le_bytes()).collect();
+                }
+            }
+            // `merge` returns every buffer with its resolved mode pinned.
+            b.mode = Some(*mode);
+        }
+        Ok(task)
+    }
+
+    /// Runs piece `piece` (covering `range`) of `task`; returns the bytes the merge needs.
+    fn run_piece(
+        &self,
+        module: &Module,
+        task: &CpuTask,
+        modes: &[ShardMode],
+        piece: usize,
+        range: Range<usize>,
+    ) -> Result<Vec<Option<Vec<u8>>>, StruumError> {
+        let inputs: Vec<Input> = task
+            .buffers()
+            .iter()
+            .zip(modes)
+            .map(|(b, mode)| {
+                let stride = b.buffer.stride;
+                let data = match mode {
+                    ShardMode::Split => Data::Bytes(&b.buffer.data[range.start * stride..range.end * stride]),
+                    ShardMode::Broadcast => Data::Bytes(&b.buffer.data),
+                    ShardMode::SumF32 => Data::Zeroed(b.buffer.data.len()),
+                };
+                Input { data, stride }
+            })
+            .collect();
+        let mut out: Vec<Option<Vec<u8>>> = vec![None; inputs.len()];
+        let offset = (task.offset() + range.start) as u32;
+        self.run_raw(module, task.entry(), offset, range.len(), &inputs, |i, bytes| {
+            if modes[i] != ShardMode::Broadcast || piece == 0 {
+                out[i] = Some(bytes.to_vec());
+            }
+        })?;
+        Ok(out)
     }
 
     fn module(&self, bytes: &[u8]) -> Result<Module, StruumError> {
@@ -116,8 +199,17 @@ impl CpuExecutor {
         Ok(module)
     }
 
-    /// Runs one piece of work in a fresh instance and copies the buffers back.
-    fn run_instance(&self, module: &Module, task: &mut CpuTask) -> Result<(), StruumError> {
+    /// Runs `entry` in a fresh instance over `inputs`, then hands each buffer's final
+    /// bytes in wasm memory to `read_back(index, bytes)`.
+    fn run_raw(
+        &self,
+        module: &Module,
+        entry_name: &str,
+        offset: u32,
+        work_count: usize,
+        inputs: &[Input],
+        mut read_back: impl FnMut(usize, &[u8]),
+    ) -> Result<(), StruumError> {
         let mut store = Store::new(&self.engine, ());
         let ticks = (self.timeout.as_millis() / EPOCH_TICK.as_millis()).max(1) as u64;
         store.set_epoch_deadline(ticks);
@@ -134,26 +226,31 @@ impl CpuExecutor {
             .get_typed_func::<(u32, u32), u32>(&mut store, "struum_alloc")
             .map_err(|e| task_err("wasm module must export struum_alloc(u32, u32) -> u32", e))?;
         let entry = instance
-            .get_typed_func::<u32, i32>(&mut store, task.entry())
-            .map_err(|e| task_err(&format!("wasm entry '{}(u32) -> i32' not found", task.entry()), e))?;
+            .get_typed_func::<u32, i32>(&mut store, entry_name)
+            .map_err(|e| task_err(&format!("wasm entry '{}(u32) -> i32' not found", entry_name), e))?;
 
         // Copy buffers in.
-        let mut ptrs = Vec::with_capacity(task.buffers().len());
-        for b in task.buffers() {
-            let len = b.buffer.data.len() as u32;
+        let mut ptrs = Vec::with_capacity(inputs.len());
+        for (i, input) in inputs.iter().enumerate() {
+            let len = input.data.len();
             let ptr = alloc
-                .call(&mut store, (len, BUFFER_ALIGN))
+                .call(&mut store, (len as u32, BUFFER_ALIGN))
                 .map_err(|e| task_err("struum_alloc failed", e))?;
-            memory
-                .write(&mut store, ptr as usize, &b.buffer.data)
-                .map_err(|e| task_err(&format!("writing buffer '{}'", b.buffer.name), e))?;
+            let dest = memory
+                .data_mut(&mut store)
+                .get_mut(ptr as usize..ptr as usize + len)
+                .ok_or_else(|| StruumError::TaskError(format!("writing buffer {i}: out of bounds")))?;
+            match input.data {
+                Data::Bytes(bytes) => dest.copy_from_slice(bytes),
+                Data::Zeroed(_) => dest.fill(0),
+            }
             ptrs.push(ptr);
         }
 
         // Descriptor: [offset, len, count, (ptr, byte_len, stride)*]
-        let mut desc = vec![task.offset() as u32, task.work_count() as u32, ptrs.len() as u32];
-        for (b, ptr) in task.buffers().iter().zip(&ptrs) {
-            desc.extend([*ptr, b.buffer.data.len() as u32, b.buffer.stride as u32]);
+        let mut desc = vec![offset, work_count as u32, ptrs.len() as u32];
+        for (input, ptr) in inputs.iter().zip(&ptrs) {
+            desc.extend([*ptr, input.data.len() as u32, input.stride as u32]);
         }
         let desc_bytes: Vec<u8> = desc.iter().flat_map(|v| v.to_le_bytes()).collect();
         let desc_ptr = alloc
@@ -167,28 +264,76 @@ impl CpuExecutor {
             if e.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
                 StruumError::TaskError(format!(
                     "task '{}' exceeded the {:?} time limit",
-                    task.entry(),
+                    entry_name,
                     self.timeout
                 ))
             } else {
-                task_err(&format!("task '{}' trapped", task.entry()), format!("{e:?}"))
+                task_err(&format!("task '{}' trapped", entry_name), format!("{e:?}"))
             }
         })?;
         if status != 0 {
             return Err(StruumError::TaskError(format!(
                 "task '{}' returned error status {}",
-                task.entry(),
+                entry_name,
                 status
             )));
         }
 
         // Copy buffers out.
-        for (b, ptr) in task.buffers_mut().iter_mut().zip(&ptrs) {
-            memory
-                .read(&store, *ptr as usize, &mut b.buffer.data)
-                .map_err(|e| task_err(&format!("reading buffer '{}'", b.buffer.name), e))?;
+        let mem = memory.data(&store);
+        for (i, (input, ptr)) in inputs.iter().zip(&ptrs).enumerate() {
+            let bytes = mem
+                .get(*ptr as usize..*ptr as usize + input.data.len())
+                .ok_or_else(|| StruumError::TaskError(format!("reading buffer {i}: out of bounds")))?;
+            read_back(i, bytes);
         }
         Ok(())
+    }
+}
+
+/// A buffer as written into a wasm instance.
+struct Input<'a> {
+    data: Data<'a>,
+    stride: usize,
+}
+
+enum Data<'a> {
+    Bytes(&'a [u8]),
+    /// A zero-filled accumulator of this many bytes (`SumF32` pieces).
+    Zeroed(usize),
+}
+
+impl Data<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Data::Bytes(b) => b.len(),
+            Data::Zeroed(n) => *n,
+        }
+    }
+}
+
+/// The checks `shard_buffers` makes before splitting, with the same errors.
+fn check_piece_input(buffer: &Buffer, mode: ShardMode, work_count: usize) -> Result<(), StruumError> {
+    match mode {
+        ShardMode::Split if buffer.actual_len() != work_count => Err(StruumError::ShardError(format!(
+            "split buffer '{}' has {} elements but the work count is {}",
+            buffer.name,
+            buffer.actual_len(),
+            work_count
+        ))),
+        ShardMode::SumF32
+            if buffer.stride == 0
+                || !buffer.stride.is_multiple_of(4)
+                || !buffer.data.len().is_multiple_of(buffer.stride) =>
+        {
+            Err(StruumError::ShardError(format!(
+                "SumF32 buffer '{}' must hold f32 values (stride {}, {} bytes)",
+                buffer.name,
+                buffer.stride,
+                buffer.data.len()
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -250,6 +395,45 @@ mod tests {
             .collect();
         let out = CpuTask::merge(parts).unwrap();
         assert_eq!(out.get_buffer("acc").unwrap().as_slice::<f32>(), &want);
+    }
+
+    /// The multi-threaded path must give exactly what shard -> run -> merge gives.
+    #[test]
+    fn threaded_execute_matches_shard_and_merge() {
+        let mut t = task("sum", 1001);
+        t.add_buffer(Buffer::new("acc", &[0.5f32, 0.25]));
+        t.set_shard_mode("acc", struum_types::ShardMode::SumF32).unwrap();
+        let weights: Vec<f32> = (0..50_000).map(|i| i as f32 * 0.1).collect();
+        t.add_buffer(Buffer::new("weights", &weights));
+
+        let single = CpuExecutor::with_options(1, Duration::from_secs(10)).unwrap();
+        let parts = split_ranges(1001, 4)
+            .into_iter()
+            .map(|r| single.execute(t.shard(r).unwrap()).unwrap())
+            .collect();
+        let reference = CpuTask::merge(parts).unwrap();
+
+        let multi = CpuExecutor::with_options(4, Duration::from_secs(10)).unwrap();
+        let out = multi.execute(t.clone()).unwrap();
+        assert_eq!(out.buffers().len(), reference.buffers().len());
+        for (a, b) in out.buffers().iter().zip(reference.buffers()) {
+            assert_eq!(a.buffer.name, b.buffer.name);
+            assert_eq!(a.buffer.data, b.buffer.data, "buffer '{}'", a.buffer.name);
+            assert_eq!(a.buffer.stride, b.buffer.stride);
+            assert_eq!(a.mode, b.mode, "buffer '{}'", a.buffer.name);
+        }
+        assert_eq!(out.offset(), reference.offset());
+    }
+
+    #[test]
+    fn threaded_execute_rejects_bad_inputs_like_shard() {
+        let mut t = task("double", 100);
+        t.add_buffer(Buffer::new("odd", &[1u8, 2, 3]));
+        t.set_shard_mode("odd", struum_types::ShardMode::SumF32).unwrap();
+        let exec = CpuExecutor::with_options(4, Duration::from_secs(10)).unwrap();
+        let err = exec.execute(t.clone()).unwrap_err().to_string();
+        assert!(err.contains("must hold f32"), "{err}");
+        assert!(t.shard(0..10).is_err());
     }
 
     #[test]

@@ -38,6 +38,41 @@ pub enum TcpPacket {
     // New variants are appended so existing bincode tags stay stable.
     WORK(WorkPacket),
     WORKERROR(WorkErrorPacket),
+    /// Like `WORK`, with large blobs the peer already holds sent as [`BlobRef`]s.
+    WORKREF(WorkRefPacket),
+    /// Reply to `WORKREF` when the peer no longer holds some referenced blobs.
+    CACHEMISS(CacheMissPacket),
+}
+
+/// Content hash of a blob (xxh3-64 of its bytes).
+pub type BlobHash = u64;
+
+/// A large blob of a [`WorkRefPacket`]'s work left out because the peer
+/// already holds it: `slot` says where it goes (see `struum_scheduler::Work`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobRef {
+    pub slot: u32,
+    pub hash: BlobHash,
+}
+
+/// Work whose referenced blobs are left empty in `data`. Answered like `WORK`,
+/// or with `CACHEMISS` listing blobs the peer must be sent again.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorkRefPacket {
+    pub task_id: String,
+    pub sender_id: UID,
+    pub kind: WorkKind,
+    pub refs: Vec<BlobRef>,
+    /// Kept last so it can be streamed straight after the header.
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,
+}
+
+/// The receiver of a `WORKREF` does not hold these blobs; nothing was run.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct CacheMissPacket {
+    pub task_id: String,
+    pub missing: Vec<BlobHash>,
 }
 
 /// Kind of work carried by a [`WorkPacket`].
@@ -56,6 +91,7 @@ pub struct WorkPacket {
     pub task_id: String,
     pub sender_id: UID,
     pub kind: WorkKind,
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
@@ -97,6 +133,7 @@ pub struct TaskDataPacket {
     /// ID of the node that sent this task.
     pub sender_id: UID,
     /// Serialized kernel data (bincode-encoded Kernel struct).
+    #[serde(with = "serde_bytes")]
     pub kernel_data: Vec<u8>,
 }
 
@@ -113,6 +150,7 @@ pub struct ResultPacket {
     /// ID of the node that computed the result.
     pub sender_id: UID,
     /// Serialized result data.
+    #[serde(with = "serde_bytes")]
     pub result_data: Vec<u8>,
 }
 
@@ -133,6 +171,9 @@ pub struct IntroductionPacket {
     pub backend: Option<NodeBackend>,
     #[serde(default)]
     pub tcp_port: Option<u16>,
+    /// UDP port of the node's QUIC endpoint, if it serves over QUIC.
+    #[serde(default)]
+    pub quic_port: Option<u16>,
 }
 
 impl From<IntroductionPacket> for NodeDetails {
@@ -143,6 +184,7 @@ impl From<IntroductionPacket> for NodeDetails {
             role: packet.role,
             backend: packet.backend,
             tcp_port: packet.tcp_port,
+            quic_port: packet.quic_port,
         }
     }
 }
@@ -155,6 +197,9 @@ pub struct NodeDetails {
     pub backend: Option<NodeBackend>,
     #[serde(default)]
     pub tcp_port: Option<u16>,
+    /// UDP port of the node's QUIC endpoint, if it serves over QUIC.
+    #[serde(default)]
+    pub quic_port: Option<u16>,
 }
 
 impl NodeDetails {
@@ -162,12 +207,19 @@ impl NodeDetails {
     pub fn tcp_addr(&self) -> Option<SocketAddr> {
         self.tcp_port.map(|p| SocketAddr::new(self.ip.ip(), p))
     }
+
+    /// Returns the SocketAddr of this node's QUIC endpoint, if it has one.
+    pub fn quic_addr(&self) -> Option<SocketAddr> {
+        self.quic_port.map(|p| SocketAddr::new(self.ip.ip(), p))
+    }
 }
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-static NEXT_UID: AtomicU8 = AtomicU8::new(1);
+static NEXT_UID: AtomicU64 = AtomicU64::new(1);
 
+/// Node identifier. 64-bit and randomly generated, so independently started
+/// nodes practically never collide.
 #[derive(
     Default,
     Deserialize,
@@ -180,47 +232,51 @@ static NEXT_UID: AtomicU8 = AtomicU8::new(1);
     Copy,
 )]
 pub struct UID {
-    pub inner: u8,
+    pub inner: u64,
 }
 
 impl UID {
-    pub fn new(inner: u8) -> UID {
+    pub fn new(inner: u64) -> UID {
         UID { inner }
     }
 
-    /// Automatically generates a new unique UID across threads and processes.
+    /// Generates a random, non-zero UID. Uses the process-random `RandomState`
+    /// keys mixed with time, pid and a counter, so no extra RNG dependency is needed.
     pub fn generate() -> UID {
+        use std::hash::{BuildHasher, Hasher};
         use std::time::{SystemTime, UNIX_EPOCH};
-        let pid = std::process::id();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let seed = (pid.wrapping_mul(31) ^ nanos) as u8;
-        let count = NEXT_UID.fetch_add(1, Ordering::Relaxed);
-        let val = seed.wrapping_add(count);
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        h.write_u32(std::process::id());
+        h.write_u64(NEXT_UID.fetch_add(1, Ordering::Relaxed));
+        let val = h.finish();
         UID { inner: if val == 0 { 1 } else { val } }
     }
 
-    pub fn id(&self) -> u8 {
+    pub fn id(&self) -> u64 {
         self.inner
     }
 }
 
-impl From<u8> for UID {
-    fn from(inner: u8) -> Self {
+impl From<u64> for UID {
+    fn from(inner: u64) -> Self {
         UID { inner }
     }
 }
 
-impl From<UID> for u8 {
+impl From<UID> for u64 {
     fn from(uid: UID) -> Self {
         uid.inner
     }
 }
 
 impl std::ops::Deref for UID {
-    type Target = u8;
+    type Target = u64;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
@@ -270,4 +326,17 @@ pub trait NetworkCoordinator {
 
     /// Initiates information exchange between registered nodes.
     async fn establish_information_exchange(&mut self) -> Result<(), StruumError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UID;
+    use std::collections::HashSet;
+
+    #[test]
+    fn generated_uids_are_unique_and_non_zero() {
+        let ids: HashSet<UID> = (0..10_000).map(|_| UID::generate()).collect();
+        assert_eq!(ids.len(), 10_000);
+        assert!(!ids.contains(&UID::new(0)));
+    }
 }

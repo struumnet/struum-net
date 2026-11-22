@@ -7,6 +7,7 @@ use struum_types::{BoundBuffer, Buffer, ShardMode, Shardable, StruumError};
 /// A CPU task: a WebAssembly module, the entry point to call, and its buffers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuTask {
+    #[serde(with = "serde_bytes")]
     module: Vec<u8>,
     entry: String,
     buffers: Vec<BoundBuffer>,
@@ -47,14 +48,22 @@ impl CpuTask {
         Ok(())
     }
 
+    /// The buffer called `name`.
     pub fn get_buffer(&self, name: &str) -> Option<&Buffer> {
         self.buffers.iter().find(|b| b.buffer.name == name).map(|b| &b.buffer)
     }
 
+    /// The WebAssembly module (binary or WAT text).
     pub fn module(&self) -> &[u8] {
         &self.module
     }
 
+    /// Mutable access to the module bytes (used to send cached modules by reference).
+    pub fn module_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.module
+    }
+
+    /// Name of the exported function to call.
     pub fn entry(&self) -> &str {
         &self.entry
     }
@@ -64,6 +73,7 @@ impl CpuTask {
         &self.buffers
     }
 
+    /// All buffers, in the order the guest sees them, mutably.
     pub fn buffers_mut(&mut self) -> &mut [BoundBuffer] {
         &mut self.buffers
     }
@@ -76,6 +86,23 @@ impl CpuTask {
         self.get_buffer(name)
             .map(|b| b.actual_len())
             .ok_or_else(|| StruumError::NotFound(format!("Work buffer '{}' not found", name)))
+    }
+
+    /// How each buffer is distributed when this task is split into `work_count`
+    /// pieces (work buffer always `Split`), like [`CpuTask::shard`] decides, without
+    /// cloning any buffer data.
+    pub(crate) fn resolved_modes(&self) -> Vec<ShardMode> {
+        let count = self.work_count();
+        self.buffers
+            .iter()
+            .map(|b| {
+                if self.work_buffer.as_deref() == Some(b.buffer.name.as_str()) {
+                    ShardMode::Split
+                } else {
+                    b.resolved_mode(count)
+                }
+            })
+            .collect()
     }
 
     /// Buffers with the work buffer pinned to `Split`.

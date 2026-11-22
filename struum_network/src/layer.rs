@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::net::AddrParseError;
@@ -10,8 +10,10 @@ use struum_types::{
     network::{TcpPacket, UdpPacket},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 /// Network layer is an Abstract layers that allows for any higher-level objects
 /// like `Node`, `Coordinator` to consist of a Network Layer for itself.
@@ -20,7 +22,7 @@ pub struct NetworkLayer<const BUF_SIZE: usize> {
     /// Public(Local) IPv4 address of itself, fetched during an outbound UDP connection.
     pub ip: IpAddr,
     /// A pool of connections of SocketAddresses with live connection made with other `NetworkLayer`s.
-    connections: HashMap<SocketAddr, Arc<Mutex<TcpStream>>>,
+    connections: HashMap<SocketAddr, Connection>,
     /// A reserved port to be used by the OS for UDP communication.
     pub udp_port: u16,
     /// A reserved port to be used by the OS for TCP communication.
@@ -57,6 +59,50 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     }
 }
 
+/// One live TCP connection plus what we know about the peer on the other end.
+#[derive(Clone)]
+struct Connection {
+    reader: Arc<Mutex<BoxReader>>,
+    writer: Arc<Mutex<BoxWriter>>,
+    known_blobs: Arc<std::sync::Mutex<HashSet<u64>>>,
+    broken: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connection").field("broken", &self.broken).finish()
+    }
+}
+
+impl Connection {
+    fn new(stream: TcpStream) -> Self {
+        let (reader, writer) = stream.into_split();
+        Self {
+            reader: Arc::new(Mutex::new(Box::new(reader))),
+            writer: Arc::new(Mutex::new(Box::new(writer))),
+            known_blobs: Arc::default(),
+            broken: Arc::default(),
+        }
+    }
+}
+
+/// Socket buffer size for peer connections: large shards on a high-latency
+/// Wi-Fi link need more than the default window in flight.
+const SOCKET_BUFFER_BYTES: usize = 4 << 20;
+
+/// Largest packet accepted from a peer. The length header comes off the wire, so
+/// without a limit a corrupt or hostile peer could make us allocate up to 4 GiB.
+pub const MAX_FRAME_BYTES: usize = 1 << 30;
+
+/// Request/response tuning applied to every peer connection.
+fn tune_stream(stream: &TcpStream) {
+    // Don't let Nagle + delayed ACK stall small packets.
+    let _ = stream.set_nodelay(true);
+    let sock = socket2::SockRef::from(stream);
+    let _ = sock.set_send_buffer_size(SOCKET_BUFFER_BYTES);
+    let _ = sock.set_recv_buffer_size(SOCKET_BUFFER_BYTES);
+}
+
 /// Gives a local IP address for the NetworkLayer
 async fn get_local_ip() -> Result<IpAddr, StruumError> {
     let socket = UdpSocket::bind("0.0.0.0:0")
@@ -85,11 +131,10 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
         let stream = TcpStream::connect(target_addr)
             .await
             .map_err(|e| NetworkConnectionError(format!("Failed to connect to {}: {}", target_addr, e)))?;
-        // Request/response traffic: don't let Nagle + delayed ACK stall small packets.
-        let _ = stream.set_nodelay(true);
+        tune_stream(&stream);
 
         self.connections
-            .insert(target_addr, Arc::new(Mutex::new(stream)));
+            .insert(target_addr, Connection::new(stream));
 
         Ok(())
     }
@@ -200,9 +245,13 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     /// Returns a cloneable handle to the connection with `addr`, usable from
     /// other tasks without borrowing the `NetworkLayer`.
     pub fn peer(&self, addr: &SocketAddr) -> Option<PeerConnection> {
-        self.connections.get(addr).map(|stream| PeerConnection {
+        self.connections.get(addr).map(|conn| PeerConnection {
             addr: *addr,
-            stream: stream.clone(),
+            reader: conn.reader.clone(),
+            writer: conn.writer.clone(),
+            known_blobs: conn.known_blobs.clone(),
+            broken: conn.broken.clone(),
+            _keep_alive: None,
         })
     }
 
@@ -219,11 +268,23 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
             .accept()
             .await
             .map_err(|e| NetworkConnectionError(format!("Failed to accept TCP connection: {}", e)))?;
-        let _ = stream.set_nodelay(true);
+        tune_stream(&stream);
         log::info!("Accepted TCP connection from {}", peer_addr);
         self.connections
-            .insert(peer_addr, Arc::new(Mutex::new(stream)));
+            .insert(peer_addr, Connection::new(stream));
         Ok(peer_addr)
+    }
+
+    /// Accepts the next incoming connection and hands it to the caller without
+    /// keeping it in the pool, so a serving task can own it outright.
+    pub async fn accept_peer(&self) -> Result<PeerConnection, StruumError> {
+        let (stream, peer_addr) = self
+            .tcp_listener
+            .accept()
+            .await
+            .map_err(|e| NetworkConnectionError(format!("Failed to accept TCP connection: {}", e)))?;
+        log::info!("Accepted TCP connection from {}", peer_addr);
+        Ok(PeerConnection::from_stream(stream, peer_addr))
     }
 
     /// Reads a length-prefixed TcpPacket from an established connection.
@@ -238,74 +299,260 @@ impl<const BUF_SIZE: usize> NetworkLayer<BUF_SIZE> {
     }
 }
 
-/// Handle to one TCP connection. Cloning it shares the same stream, so a
-/// request/response exchange should hold it for both halves (see [`PeerConnection::request`]).
-#[derive(Debug, Clone)]
+/// Handle to one TCP connection. Clones share the connection.
+///
+/// Reads and writes lock separate halves of the stream, so one task can keep
+/// sending while another waits for replies. A caller that expects replies in
+/// order holds [`PeerConnection::reader`] for as long as it has requests
+/// outstanding, so no other task takes its replies.
+///
+/// A read or write that fails or is cancelled part-way leaves the stream out of
+/// step with the peer. The connection is then marked broken, and every later
+/// read or write on it fails at once instead of misreading the stream.
+#[derive(Clone)]
 pub struct PeerConnection {
     pub addr: SocketAddr,
-    stream: Arc<Mutex<TcpStream>>,
+    reader: Arc<Mutex<BoxReader>>,
+    writer: Arc<Mutex<BoxWriter>>,
+    /// Content hashes of blobs the peer is believed to hold for this connection
+    /// (see `TcpPacket::WORKREF`). Shared by every handle to the connection and
+    /// reset when it is replaced.
+    known_blobs: Arc<std::sync::Mutex<HashSet<u64>>>,
+    broken: Arc<AtomicBool>,
+    _keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for PeerConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerConnection")
+            .field("addr", &self.addr)
+            .field("broken", &self.is_broken())
+            .finish()
+    }
+}
+
+type BoxReader = Box<dyn AsyncRead + Send + Unpin>;
+type BoxWriter = Box<dyn AsyncWrite + Send + Unpin>;
+
+/// Exclusive use of a connection's read half; see [`PeerConnection::reader`].
+pub struct PeerReader<'a> {
+    conn: &'a PeerConnection,
+    half: MutexGuard<'a, BoxReader>,
+}
+
+impl PeerReader<'_> {
+    /// Receives the next length-prefixed packet.
+    pub async fn recv(&mut self) -> Result<TcpPacket, StruumError> {
+        let addr = self.conn.addr;
+        let half = &mut *self.half;
+        self.conn.guarded(read_packet(half, addr)).await
+    }
+}
+
+/// Marks the connection broken when dropped before [`OpGuard::done`]: the
+/// operation failed or was cancelled mid-frame.
+struct OpGuard<'a>(&'a AtomicBool, bool);
+
+impl OpGuard<'_> {
+    fn done(mut self) {
+        self.1 = true;
+    }
+}
+
+impl Drop for OpGuard<'_> {
+    fn drop(&mut self) {
+        if !self.1 {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 impl PeerConnection {
+    /// A connection over any ordered byte stream (e.g. one QUIC stream), with
+    /// the same framing as TCP. `keep_alive` is held for as long as any handle
+    /// exists, e.g. the QUIC connection the stream belongs to.
+    pub fn from_halves(
+        addr: SocketAddr,
+        reader: impl AsyncRead + Send + Unpin + 'static,
+        writer: impl AsyncWrite + Send + Unpin + 'static,
+        keep_alive: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Self {
+        Self {
+            addr,
+            reader: Arc::new(Mutex::new(Box::new(reader))),
+            writer: Arc::new(Mutex::new(Box::new(writer))),
+            known_blobs: Arc::default(),
+            broken: Arc::default(),
+            _keep_alive: keep_alive,
+        }
+    }
+
+    fn from_stream(stream: TcpStream, addr: SocketAddr) -> Self {
+        tune_stream(&stream);
+        let conn = Connection::new(stream);
+        Self {
+            addr,
+            reader: conn.reader,
+            writer: conn.writer,
+            known_blobs: conn.known_blobs,
+            broken: conn.broken,
+            _keep_alive: None,
+        }
+    }
+
+    /// Opens a connection to `addr` outside any [`NetworkLayer`] pool.
+    pub async fn connect(addr: SocketAddr) -> Result<Self, StruumError> {
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|e| NetworkConnectionError(format!("Failed to connect to {}: {}", addr, e)))?;
+        Ok(Self::from_stream(stream, addr))
+    }
+
+    /// Locks the set of blob hashes the peer is believed to hold.
+    pub fn known_blobs(&self) -> std::sync::MutexGuard<'_, HashSet<u64>> {
+        self.known_blobs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether an earlier read or write failed or was cancelled part-way.
+    pub fn is_broken(&self) -> bool {
+        self.broken.load(Ordering::SeqCst)
+    }
+
+    async fn guarded<T>(
+        &self,
+        op: impl std::future::Future<Output = Result<T, StruumError>>,
+    ) -> Result<T, StruumError> {
+        if self.is_broken() {
+            return Err(NetworkConnectionError(format!(
+                "connection to {} is broken by an earlier failed read or write",
+                self.addr
+            )));
+        }
+        let guard = OpGuard(&self.broken, false);
+        let out = op.await;
+        if out.is_ok() {
+            guard.done();
+        }
+        out
+    }
+
+    /// Waits for exclusive use of the read half. Replies arrive in the order
+    /// requests were sent, so hold it from the first request to the last reply.
+    pub async fn reader(&self) -> PeerReader<'_> {
+        PeerReader { conn: self, half: self.reader.lock().await }
+    }
+
     /// Sends one length-prefixed packet.
     pub async fn send(&self, packet: &TcpPacket) -> Result<(), StruumError> {
-        let mut stream = self.stream.lock().await;
-        Self::write_packet(&mut stream, self.addr, packet).await
+        let mut writer = self.writer.lock().await;
+        self.guarded(write_packet(&mut *writer, self.addr, packet)).await
+    }
+
+    /// Sends a packet whose last field is a byte vector (e.g. `WORK`): `header`
+    /// is the packet with that field left empty, and `payload` is written
+    /// straight after it, so large payloads are never copied into a frame. The
+    /// bytes on the wire are identical to sending the full packet.
+    pub async fn send_with_payload(&self, header: &TcpPacket, payload: &[u8]) -> Result<(), StruumError> {
+        let frame = Self::frame_with_payload(header, payload.len())?;
+        let mut writer = self.writer.lock().await;
+        let addr = self.addr;
+        self.guarded(async {
+            let w = &mut *writer;
+            w.write_all(&frame).await.map_err(|e| NetworkConnectionError(e.to_string()))?;
+            w.write_all(payload).await.map_err(|e| NetworkConnectionError(e.to_string()))?;
+            w.flush().await.map_err(|e| NetworkConnectionError(e.to_string()))?;
+            log::debug!("Sent TCP packet ({} bytes) to {}", frame.len() - 4 + payload.len(), addr);
+            Ok(())
+        })
+        .await
     }
 
     /// Receives one length-prefixed packet.
     pub async fn recv(&self) -> Result<TcpPacket, StruumError> {
-        let mut stream = self.stream.lock().await;
-        Self::read_packet(&mut stream, self.addr).await
+        self.reader().await.recv().await
     }
 
-    /// Sends `packet` and waits for the reply while holding the connection.
+    /// Sends `packet` and waits for its reply, holding the read half throughout.
     pub async fn request(&self, packet: &TcpPacket) -> Result<TcpPacket, StruumError> {
-        let mut stream = self.stream.lock().await;
-        Self::write_packet(&mut stream, self.addr, packet).await?;
-        Self::read_packet(&mut stream, self.addr).await
+        let mut reader = self.reader().await;
+        self.send(packet).await?;
+        reader.recv().await
     }
 
-    async fn write_packet(
-        stream: &mut TcpStream,
-        addr: SocketAddr,
-        packet: &TcpPacket,
-    ) -> Result<(), StruumError> {
-        let payload_len = bincode::serialized_size(packet)
-            .map_err(|e| NetworkConnectionError(e.to_string()))? as usize;
-        // Header and payload in one buffer => one write, one TCP segment burst.
-        let mut frame = Vec::with_capacity(4 + payload_len);
-        frame.extend_from_slice(&(payload_len as u32).to_be_bytes());
-        bincode::serialize_into(&mut frame, packet).map_err(|e| NetworkConnectionError(e.to_string()))?;
-        stream
-            .write_all(&frame)
-            .await
-            .map_err(|e| NetworkConnectionError(e.to_string()))?;
-        stream
-            .flush()
-            .await
-            .map_err(|e| NetworkConnectionError(e.to_string()))?;
-        log::debug!("Sent TCP packet ({} bytes) to {}", payload_len, addr);
-        Ok(())
+    /// [`PeerConnection::send_with_payload`] followed by waiting for the reply.
+    pub async fn request_with_payload(
+        &self,
+        header: &TcpPacket,
+        payload: &[u8],
+    ) -> Result<TcpPacket, StruumError> {
+        let mut reader = self.reader().await;
+        self.send_with_payload(header, payload).await?;
+        reader.recv().await
     }
 
-    async fn read_packet(stream: &mut TcpStream, addr: SocketAddr) -> Result<TcpPacket, StruumError> {
-        let mut len_buf = [0u8; 4];
-        stream
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(|e| NetworkConnectionError(format!("Failed to read TCP length header from {}: {}", addr, e)))?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-
-        let mut payload = vec![0u8; len];
-        stream
-            .read_exact(&mut payload)
-            .await
-            .map_err(|e| NetworkConnectionError(format!("Failed to read TCP payload from {}: {}", addr, e)))?;
-
-        let packet: TcpPacket = bincode::deserialize(&payload)
-            .map_err(|e| StruumError::SerializationError(format!("Failed to deserialize TcpPacket from {}: {}", addr, e)))?;
-        log::debug!("Received TCP packet ({} bytes) from {}", len, addr);
-        Ok(packet)
+    /// Length prefix + `header`, with the trailing empty byte field's length set to `payload_len`.
+    pub fn frame_with_payload(header: &TcpPacket, payload_len: usize) -> Result<Vec<u8>, StruumError> {
+        let mut frame = vec![0u8; 4];
+        bincode::serialize_into(&mut frame, header).map_err(|e| NetworkConnectionError(e.to_string()))?;
+        // bincode ends the packet with the empty field's u64 length (0): patch it.
+        let len_at = frame.len() - 8;
+        if frame[len_at..] != [0u8; 8] {
+            return Err(NetworkConnectionError(
+                "header packet must end with an empty byte field".to_string(),
+            ));
+        }
+        frame[len_at..].copy_from_slice(&(payload_len as u64).to_le_bytes());
+        let total = u32::try_from(frame.len() - 4 + payload_len)
+            .map_err(|_| NetworkConnectionError(format!("packet too large: {payload_len} bytes")))?;
+        frame[..4].copy_from_slice(&total.to_be_bytes());
+        Ok(frame)
     }
+}
+
+async fn write_packet(
+    stream: &mut (impl AsyncWrite + Unpin),
+    addr: SocketAddr,
+    packet: &TcpPacket,
+) -> Result<(), StruumError> {
+    let payload_len = bincode::serialized_size(packet)
+        .map_err(|e| NetworkConnectionError(e.to_string()))? as usize;
+    // Header and payload in one buffer => one write, one TCP segment burst.
+    let mut frame = Vec::with_capacity(4 + payload_len);
+    frame.extend_from_slice(&(payload_len as u32).to_be_bytes());
+    bincode::serialize_into(&mut frame, packet).map_err(|e| NetworkConnectionError(e.to_string()))?;
+    stream
+        .write_all(&frame)
+        .await
+        .map_err(|e| NetworkConnectionError(e.to_string()))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| NetworkConnectionError(e.to_string()))?;
+    log::debug!("Sent TCP packet ({} bytes) to {}", payload_len, addr);
+    Ok(())
+}
+
+async fn read_packet(stream: &mut (impl AsyncRead + Unpin), addr: SocketAddr) -> Result<TcpPacket, StruumError> {
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| NetworkConnectionError(format!("Failed to read TCP length header from {}: {}", addr, e)))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(NetworkConnectionError(format!(
+            "{addr} sent a {len}-byte packet (limit {MAX_FRAME_BYTES})"
+        )));
+    }
+
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .map_err(|e| NetworkConnectionError(format!("Failed to read TCP payload from {}: {}", addr, e)))?;
+
+    let packet: TcpPacket = bincode::deserialize(&payload)
+        .map_err(|e| StruumError::SerializationError(format!("Failed to deserialize TcpPacket from {}: {}", addr, e)))?;
+    log::debug!("Received TCP packet ({} bytes) from {}", len, addr);
+    Ok(packet)
 }

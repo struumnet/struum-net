@@ -1,3 +1,28 @@
+//! GPU kernels: GLSL compute code plus its buffers, ready to ship to a worker.
+//!
+//! A [`Kernel`] holds a GLSL function, the buffers it uses and which buffer defines the
+//! work range. [`Kernel::pack`] turns it into a complete compute shader, which the
+//! OpenGL backend (`struum_opengl`) compiles and runs. Kernels are serializable and
+//! [`Shardable`]: a node can split one across peers and merge the results.
+//!
+//! Buffer element types implement [`GPUType`]: `f32`, `u32`, `i32` and friends, or your
+//! own structs with `#[gpu_type]` from `struum_macros`.
+//!
+//! ```
+//! use struum_kernel::Kernel;
+//! use struum_types::Buffer;
+//!
+//! let mut kernel = Kernel::new("void compute(uint i) { y[i] = 2.0 * x[i]; }", "compute");
+//! kernel.add_buffer::<f32>(Buffer::new("x", &[1.0f32, 2.0, 3.0]));
+//! kernel.add_buffer::<f32>(Buffer::empty::<f32>("y", 3));
+//! kernel.set_work_buffer("x");
+//! kernel.pack()?;
+//!
+//! assert_eq!(kernel.get_work_count(), Some(3));
+//! assert!(kernel.get_gpu_source().unwrap().contains("void main()"));
+//! # Ok::<(), struum_types::StruumError>(())
+//! ```
+
 use regex::Regex;
 use serde_derive::{Deserialize, Serialize};
 use std::ops::Range;
@@ -11,16 +36,29 @@ use struum_types::{Buffer, GPUType, ShardMode, Shardable, StruumError, is_builti
 // If it creates a bottleneck then figure something out
 const DEFAULT_LOCAL_SIZE: u32 = 128;
 
+/// A buffer attached to a [`Kernel`], with the GLSL type of its elements.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufferBinding {
+    /// The data; its name is the array name in the kernel source.
     pub buffer: Buffer,
+    /// GLSL element type, e.g. `float` or a struct name (from [`GPUType::glsl_type`]).
     pub gpu_type: String,
+    /// GLSL struct definition for struct element types; empty for built-in types.
     pub gpu_struct: String,
     /// How this buffer is distributed when the kernel is sharded.
     /// `None` infers it: one element per work item => `Split`, else `Broadcast`.
     pub shard_mode: Option<ShardMode>,
 }
 
+/// A GPU compute job: a GLSL function plus the buffers it reads and writes.
+///
+/// The source defines a function called with the index of one work item. [`Kernel::pack`]
+/// wraps it into a full compute shader: buffer declarations (one `std430` array per buffer,
+/// in the order added), the struct definitions, and a `main` that calls the entry point once
+/// per element of the work buffer. Run it locally through a node's scheduler or across
+/// peers with `Node::run_sharded`.
+///
+/// The global index of item `i` is `STRUUM_OFFSET + i` (non-zero only in shards).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Kernel {
     source: String,
@@ -38,6 +76,8 @@ pub struct Kernel {
 }
 
 impl Kernel {
+    /// Creates a kernel from GLSL `source` whose function `entry_point(uint i)` runs once
+    /// per work item.
     pub fn new(source: &str, entry_point: &str) -> Self {
         Self {
             source: source.to_string(),
@@ -52,6 +92,8 @@ impl Kernel {
         }
     }
 
+    /// Adds a buffer of `T` elements, bound at the next binding index. Its name is the
+    /// array name the source uses.
     pub fn add_buffer<T: GPUType>(&mut self, buffer: Buffer) {
         self.buffer_bindings.push(BufferBinding {
             buffer: buffer,
@@ -62,6 +104,9 @@ impl Kernel {
     }
 
     /// Overrides how buffer `name` is distributed when the kernel is sharded.
+    ///
+    /// # Errors
+    /// [`StruumError::NotFound`] if no buffer has that name.
     pub fn set_shard_mode(&mut self, name: &str, mode: ShardMode) -> Result<(), StruumError> {
         let binding = self
             .buffer_bindings
@@ -96,10 +141,17 @@ impl Kernel {
             .unwrap_or_else(|| ShardMode::infer(&binding.buffer, work_count))
     }
 
+    /// Sets the buffer whose element count is the number of work items. It is always
+    /// split when sharding.
     pub fn set_work_buffer(&mut self, name: &str) {
         self.work_buffer = Some(name.to_string());
     }
 
+    /// Computes the dispatch size and generates the full GLSL source. Call it after adding
+    /// buffers and setting the work buffer, before running the kernel.
+    ///
+    /// # Errors
+    /// [`StruumError::NotFound`] if the work buffer is unset or not one of the buffers.
     pub fn pack(&mut self) -> Result<(), StruumError> {
         self.compute_group_size()?;
         self.generate_glsl()?;
@@ -107,26 +159,32 @@ impl Kernel {
         Ok(())
     }
 
+    /// Number of work items; `None` until [`Kernel::pack`].
     pub fn get_work_count(&self) -> Option<u32> {
         self.work_count
     }
 
+    /// Number of work groups to dispatch; `None` until [`Kernel::pack`].
     pub fn get_group_size(&self) -> Option<u32> {
         self.group_size
     }
 
+    /// The generated compute shader; `None` until [`Kernel::pack`].
     pub fn get_gpu_source(&self) -> Option<&str> {
         self.gpu_source.as_deref()
     }
 
+    /// All buffers, in binding order.
     pub fn get_buffer_bindings(&self) -> &[BufferBinding] {
         &self.buffer_bindings
     }
 
+    /// All buffers, in binding order, mutably.
     pub fn get_buffer_bindings_mut(&mut self) -> &mut [BufferBinding] {
         &mut self.buffer_bindings
     }
 
+    /// The buffer called `name`.
     pub fn get_buffer(&self, name: &str) -> Option<&Buffer> {
         self.buffer_bindings
             .iter()
@@ -134,6 +192,7 @@ impl Kernel {
             .map(|binding| &binding.buffer)
     }
 
+    /// The buffer called `name`, mutably.
     pub fn get_buffer_mut(&mut self, name: &str) -> Option<&mut Buffer> {
         self.buffer_bindings
             .iter_mut()

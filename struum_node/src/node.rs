@@ -1,20 +1,23 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::mpsc::{self, Receiver};
 
 use struum_kernel::Kernel;
 use struum_network::layer::NetworkLayer;
 use struum_network::layer::PeerConnection;
-use struum_scheduler::{JobId, JobScheduler, Work};
+use struum_network::quic::{QuicLayer, QuicPeer};
+use struum_scheduler::{BlobStore, JobId, JobScheduler, Work};
 use struum_types::StruumError;
 use struum_types::network::{
     HelloPacket, IntroductionPacket, NetworkCommunicator, NetworkCoordinator, NodeBackend,
     NodeDetails, NodeRole, ResultPacket, TaskDataPacket, TaskPacket, TcpPacket, UID, UdpPacket,
-    WorkErrorPacket, WorkPacket,
+    WorkErrorPacket, WorkPacket, WorkRefPacket, CacheMissPacket,
 };
 
 use crate::dispatch::{self, ShardOptions, ShardReport};
+use crate::stats::NodeStats;
 
 /// Coordinator component embedded in a `Node`.
 /// Maintains the peer network map independently and provides node selection/lookup logic.
@@ -103,6 +106,15 @@ pub struct Node<const BUF_SIZE: usize> {
     pub coordinator: Coordinator,
     /// Configured relay server address for registration polling.
     pub relay_addr: Option<SocketAddr>,
+    /// Work given to and received from the network; see [`Node::stats`].
+    stats: Arc<NodeStats>,
+    /// Bytes of blobs kept per requester connection when serving (see
+    /// `TcpPacket::WORKREF`). Defaults to `STRUUM_BLOB_CACHE_MB` (1024 MiB).
+    pub blob_cache_bytes: usize,
+    /// QUIC endpoint, once enabled ([`Node::enable_quic`]) or first needed to dial.
+    quic: Option<Arc<QuicLayer>>,
+    /// Authenticated QUIC connections to peers, by the peer's advertised QUIC address.
+    quic_peers: HashMap<SocketAddr, QuicPeer>,
 }
 
 impl<const BUF_SIZE: usize> std::fmt::Debug for Node<BUF_SIZE> {
@@ -157,7 +169,17 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             job_rx,
             coordinator: Coordinator::new(),
             relay_addr: None,
+            stats: Arc::new(NodeStats::default()),
+            blob_cache_bytes: BlobStore::env_limit_bytes(),
+            quic: None,
+            quic_peers: HashMap::new(),
         })
+    }
+
+    /// Live counters of shards this node ran for others and others ran for it.
+    /// The handle stays valid while the node is moved into a serving task.
+    pub fn stats(&self) -> Arc<NodeStats> {
+        self.stats.clone()
     }
 
     // --- Intra-node thread communication methods (via struum_scheduler) ---
@@ -195,31 +217,52 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
 
     /// Runs `work` on this node and waits for it to finish.
     pub async fn execute_local(&mut self, work: impl Into<Work>) -> Result<Work, StruumError> {
-        let id = self.submit_work(work).await;
-        loop {
-            let done = self
-                .recv_completed_job()
-                .await
-                .ok_or_else(|| StruumError::TaskError("local scheduler stopped".to_string()))?;
-            if done == id {
-                break;
-            }
-        }
-        self.get_work_result(&id)
-            .await
-            .unwrap_or_else(|| Err("result missing".to_string()))
-            .map_err(StruumError::TaskError)
+        self.scheduler.run(work.into()).await
     }
 
     // --- Sharded execution across peers (see `dispatch`) ---
 
-    /// Opens TCP connections to every given peer that advertises a TCP port.
-    /// Returns the TCP addresses that are connected (already-open ones included).
+    /// Starts a QUIC endpoint on UDP `port` (0 picks one) that peers must
+    /// authenticate to with `token` (see `struum_network::quic`). Returns the
+    /// port. Accepting is up to the caller: see [`Node::quic`].
+    pub fn enable_quic(&mut self, port: u16, token: &[u8]) -> Result<u16, StruumError> {
+        let layer = QuicLayer::bind(SocketAddr::from(([0, 0, 0, 0], port)), self.id.inner, token)?;
+        let port = layer.local_addr()?.port();
+        log::info!("Node {} serving QUIC on UDP {}", self.id, port);
+        self.quic = Some(Arc::new(layer));
+        Ok(port)
+    }
+
+    /// The QUIC endpoint, if enabled: accept requesters with `quic().accept()`
+    /// and serve each with [`PeerServer::serve`].
+    pub fn quic(&self) -> Option<Arc<QuicLayer>> {
+        self.quic.clone()
+    }
+
+    /// UDP port of the QUIC endpoint, if enabled.
+    pub fn quic_port(&self) -> Option<u16> {
+        self.quic.as_ref().and_then(|q| q.local_addr().ok()).map(|a| a.port())
+    }
+
+    /// Connects to every given peer: over QUIC if it advertises a QUIC port,
+    /// otherwise over TCP. Returns the addresses connected (already-open ones
+    /// included).
+    ///
+    /// A QUIC peer is never retried over TCP: if it rejects our token, it
+    /// isn't one of ours. The first QUIC peer starts this node's QUIC endpoint
+    /// (token from `STRUUM_TOKEN`) unless [`Node::enable_quic`] already did.
     pub async fn connect_to_peers(&mut self, peers: &[NodeDetails]) -> Vec<SocketAddr> {
         let mut connected = Vec::new();
         for peer in peers {
+            if let Some(addr) = peer.quic_addr() {
+                match self.connect_quic(addr).await {
+                    Ok(()) => connected.push(addr),
+                    Err(e) => log::warn!("Could not connect to peer {} over QUIC at {}: {}", peer.id, addr, e),
+                }
+                continue;
+            }
             let Some(addr) = peer.tcp_addr() else {
-                log::warn!("Peer {} has no TCP port; skipping", peer.id);
+                log::warn!("Peer {} has no TCP or QUIC port; skipping", peer.id);
                 continue;
             };
             if self.net.peer(&addr).is_some() {
@@ -234,14 +277,31 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         connected
     }
 
+    async fn connect_quic(&mut self, addr: SocketAddr) -> Result<(), StruumError> {
+        if self.quic_peers.get(&addr).is_some_and(|p| !p.conn.is_broken()) {
+            return Ok(());
+        }
+        if self.quic.is_none() {
+            self.enable_quic(0, &struum_network::quic::token_from_env())?;
+        }
+        let quic = self.quic.clone().expect("enabled above");
+        let peer = quic.connect(addr).await?;
+        log::info!("Node {} connected to peer {} over QUIC at {}", self.id, peer.id, addr);
+        self.quic_peers.insert(addr, peer);
+        Ok(())
+    }
+
     /// Connected peers that can run `kind` work.
     fn eligible_peers(&self, kind: struum_types::network::WorkKind) -> Vec<PeerConnection> {
         self.coordinator
             .get_nodes()
             .into_iter()
             .filter(|p| dispatch::peer_accepts(p, kind))
-            .filter_map(|p| p.tcp_addr())
-            .filter_map(|addr| self.net.peer(&addr))
+            .filter_map(|p| match p.quic_addr() {
+                Some(addr) => self.quic_peers.get(&addr).map(|q| q.conn.clone()),
+                None => p.tcp_addr().and_then(|addr| self.net.peer(&addr)),
+            })
+            .filter(|peer| !peer.is_broken())
             .collect()
     }
 
@@ -262,19 +322,46 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         work: impl Into<Work>,
         opts: &ShardOptions,
     ) -> Result<(Work, ShardReport), StruumError> {
-        let work = work.into();
+        self.run_sharded_inner(work.into(), None, opts).await
+    }
+
+    /// Like [`Node::run_sharded_with_report`], also taking peers that connect
+    /// while the job runs: each one sent on `joins` starts pulling shards at
+    /// once. The caller sends only peers that can run this kind of work. If
+    /// every peer fails, the job waits for a joiner until the sender is dropped.
+    pub async fn run_sharded_with_joins(
+        &mut self,
+        work: impl Into<Work>,
+        joins: tokio::sync::mpsc::UnboundedReceiver<PeerConnection>,
+        opts: &ShardOptions,
+    ) -> Result<(Work, ShardReport), StruumError> {
+        self.run_sharded_inner(work.into(), Some(joins), opts).await
+    }
+
+    async fn run_sharded_inner(
+        &mut self,
+        work: Work,
+        joins: Option<tokio::sync::mpsc::UnboundedReceiver<PeerConnection>>,
+        opts: &ShardOptions,
+    ) -> Result<(Work, ShardReport), StruumError> {
         let peers = self.eligible_peers(work.kind());
-        let result = dispatch::run_sharded(self.id, work, peers, opts).await;
+        let result = dispatch::run_sharded(self.id, work, peers, joins, opts, Some(&self.stats)).await;
+        if let Ok((_, report)) = &result {
+            self.stats.job_done(report.retries as u64);
+        }
 
         if let Ok((_, report)) = &result {
             // Forget peers that failed so later jobs skip them.
             for addr in &report.retired {
                 self.net.disconnect(addr);
+                if let Some(peer) = self.quic_peers.remove(addr) {
+                    peer.close();
+                }
                 let ids: Vec<UID> = self
                     .coordinator
                     .get_nodes()
                     .into_iter()
-                    .filter(|p| p.tcp_addr() == Some(*addr))
+                    .filter(|p| p.tcp_addr() == Some(*addr) || p.quic_addr() == Some(*addr))
                     .map(|p| p.id)
                     .collect();
                 for id in ids {
@@ -285,67 +372,40 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
         result
     }
 
-    /// Serves one connected requester: executes every `WORK` (and legacy
-    /// `TASKDATA`) packet it sends and replies with `RESULT` or `WORKERROR`.
-    /// Returns when the requester disconnects.
+    /// Serves one connected requester until it disconnects; see [`PeerServer::serve`].
     pub async fn serve_peer(&mut self, peer_addr: SocketAddr) -> Result<(), StruumError> {
-        loop {
-            let packet = match self.recv_tcp_packet(&peer_addr).await {
-                Ok(p) => p,
-                Err(e) => {
-                    log::info!("Node {} stopped serving {}: {}", self.id, peer_addr, e);
-                    self.net.disconnect(&peer_addr);
-                    return Ok(());
-                }
-            };
+        let peer = self
+            .net
+            .peer(&peer_addr)
+            .ok_or_else(|| StruumError::NetworkConnectionError(format!("No TCP connection found for {peer_addr}")))?;
+        self.server().serve(peer).await;
+        self.net.disconnect(&peer_addr);
+        Ok(())
+    }
 
-            // `elide`: WORK results leave out buffers the task did not change (the
-            // requester restores them); legacy TASKDATA results are always complete.
-            let (task_id, kind, work, elide) = match packet {
-                TcpPacket::WORK(WorkPacket { task_id, kind, data, .. }) => {
-                    (task_id, kind, Work::from_bytes(kind, &data), true)
-                }
-                TcpPacket::TASKDATA(TaskDataPacket { task_id, kernel_data, .. }) => {
-                    let kind = struum_types::network::WorkKind::Gpu;
-                    (task_id, kind, Work::from_bytes(kind, &kernel_data), false)
-                }
-                other => {
-                    log::warn!("Node {} ignoring unexpected packet from {}: {:?}", self.id, peer_addr, other);
-                    continue;
-                }
-            };
-
-            log::info!("Node {} running {:?} task '{}' from {}", self.id, kind, task_id, peer_addr);
-            let started = std::time::Instant::now();
-            let result = match work {
-                Ok(work) => {
-                    let original = elide.then(|| work.clone());
-                    self.execute_local(work).await.map(|mut done| {
-                        if let Some(original) = &original {
-                            done.elide_unchanged(original);
-                        }
-                        done
-                    })
-                }
-                Err(e) => Err(e),
-            };
-
-            let reply = match result.and_then(|w| w.to_bytes()) {
-                Ok(bytes) => {
-                    log::info!("Node {} finished '{}' in {:?}", self.id, task_id, started.elapsed());
-                    TcpPacket::RESULT(ResultPacket::new(task_id, self.id, bytes))
-                }
-                Err(e) => {
-                    log::error!("Node {} failed '{}': {}", self.id, task_id, e);
-                    TcpPacket::WORKERROR(WorkErrorPacket {
-                        task_id,
-                        sender_id: self.id,
-                        message: e.to_string(),
-                    })
-                }
-            };
-            self.send_tcp_packet(peer_addr, reply).await?;
+    /// A cloneable handle that serves requesters without borrowing the node,
+    /// so each connection can be served from its own task:
+    ///
+    /// ```no_run
+    /// # async fn run(mut node: struum_node::Node<2048>) -> Result<(), struum_types::StruumError> {
+    /// loop {
+    ///     let peer = node.accept_peer().await?;
+    ///     tokio::spawn(node.server().serve(peer));
+    /// }
+    /// # }
+    /// ```
+    pub fn server(&self) -> PeerServer {
+        PeerServer {
+            id: self.id,
+            scheduler: self.scheduler.clone(),
+            stats: self.stats.clone(),
+            blob_cache_bytes: self.blob_cache_bytes,
         }
+    }
+
+    /// Accepts the next requester connection, for [`PeerServer::serve`].
+    pub async fn accept_peer(&self) -> Result<PeerConnection, StruumError> {
+        self.net.accept_peer().await
     }
 
     // --- Inter-node peer communication methods ---
@@ -686,6 +746,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
             role: NodeRole::NODE,
             backend: Some(self.backend),
             tcp_port: Some(self.net.tcp_port),
+            quic_port: self.quic_port(),
         }
     }
 
@@ -776,6 +837,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                     role: node_b.role,
                     backend: node_b.backend,
                     tcp_port: node_b.tcp_port,
+                    quic_port: node_b.quic_port,
                 }),
                 node_a.ip,
             )
@@ -790,6 +852,7 @@ impl<const BUF_SIZE: usize> Node<BUF_SIZE> {
                     role: node_a.role,
                     backend: node_a.backend,
                     tcp_port: node_a.tcp_port,
+                    quic_port: node_a.quic_port,
                 }),
                 node_b.ip,
             )
@@ -828,6 +891,7 @@ impl<const BUF_SIZE: usize> NetworkCommunicator for Node<BUF_SIZE> {
                     role: NodeRole::NODE,
                     backend: Some(self.backend),
                     tcp_port: Some(self.net.tcp_port),
+                    quic_port: self.quic_port(),
                 }),
                 ip,
             )
@@ -909,7 +973,7 @@ mod tests {
     #[tokio::test]
     async fn test_node_intra_node_thread_scheduling() {
         let _lock = GL_TEST_MUTEX.lock().unwrap();
-        let mut node = Node::<1024>::with_id(UID::new(10), 38111, 38112, NodeBackend::OpenGL, 2)
+        let mut node = Node::<1024>::with_id(UID::new(10), 0, 0, NodeBackend::OpenGL, 2)
             .await
             .expect("Failed to initialize Node");
 
@@ -957,17 +1021,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_to_node_details_conversion() {
-        let node = Node::<1024>::new(38221, 38222, NodeBackend::Cpu, 1)
+        let node = Node::<1024>::new(0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node");
 
         // Test details()
         let details = node.details();
         assert_eq!(details.id, node.id);
-        assert_eq!(details.ip.port(), 38221);
+        assert_eq!(details.ip.port(), node.net.udp_port);
         assert_eq!(details.role, NodeRole::NODE);
         assert_eq!(details.backend, Some(NodeBackend::Cpu));
-        assert_eq!(details.tcp_port, Some(38222));
+        assert_eq!(details.tcp_port, Some(node.net.tcp_port));
 
         // Test From<&Node>
         let from_ref = NodeDetails::from(&node);
@@ -980,7 +1044,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_embedded_coordinator() {
-        let mut node = Node::<1024>::new(38331, 38332, NodeBackend::Cpu, 1)
+        let mut node = Node::<1024>::new(0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node");
 
@@ -990,6 +1054,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::OpenGL),
             tcp_port: Some(38342),
+            quic_port: None,
         };
         let peer2 = NodeDetails {
             id: UID::new(102),
@@ -997,6 +1062,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
             tcp_port: Some(38352),
+            quic_port: None,
         };
 
         // Access via node delegation
@@ -1024,12 +1090,12 @@ mod tests {
     async fn test_tcp_task_data_transfer() {
         let _lock = GL_TEST_MUTEX.lock().unwrap();
         // Node 1 (Sender / Requester)
-        let mut node1 = Node::<1024>::with_id(UID::new(1), 38411, 38412, NodeBackend::Cpu, 1)
+        let mut node1 = Node::<1024>::with_id(UID::new(1), 0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node 1");
 
         // Node 2 (Receiver / Worker)
-        let mut node2 = Node::<1024>::with_id(UID::new(2), 38421, 38422, NodeBackend::OpenGL, 2)
+        let mut node2 = Node::<1024>::with_id(UID::new(2), 0, 0, NodeBackend::OpenGL, 2)
             .await
             .expect("Failed to initialize Node 2");
 
@@ -1110,15 +1176,19 @@ mod tests {
     async fn test_delayed_relay_startup_polling() {
         let _lock = GL_TEST_MUTEX.lock().unwrap();
 
-        let relay_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 38901);
+        // A port that is free now; the relay binds it later in the test.
+        let relay_port = std::net::UdpSocket::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port();
+        let relay_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), relay_port);
 
         // Node 1 & Node 2 start BEFORE the relay server is created or running
-        let mut node1 = Node::<1024>::with_id(UID::new(1), 38911, 38912, NodeBackend::Cpu, 1)
+        let mut node1 = Node::<1024>::with_id(UID::new(1), 0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node 1");
-        let mut node2 = Node::<1024>::with_id(UID::new(2), 38921, 38922, NodeBackend::Cpu, 1)
+        let n1_tcp = node1.net.tcp_port;
+        let mut node2 = Node::<1024>::with_id(UID::new(2), 0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node 2");
+        let n2_tcp = node2.net.tcp_port;
 
         // Spawn async tasks for both nodes long-polling the offline relay
         let n1_handle = tokio::spawn(async move {
@@ -1136,7 +1206,7 @@ mod tests {
         assert!(!n2_handle.is_finished());
 
         // NOW start the relay server
-        let mut relay = RelayServer::<1024>::new(38901, 38902)
+        let mut relay = RelayServer::<1024>::new(relay_port, 0)
             .await
             .expect("Failed to create RelayServer");
 
@@ -1159,17 +1229,17 @@ mod tests {
 
         // Verify Node 1 discovered Node 2 and vice versa
         assert_eq!(n1_peer.id, UID::new(2));
-        assert_eq!(n1_peer.tcp_port, Some(38922));
+        assert_eq!(n1_peer.tcp_port, Some(n2_tcp));
 
         assert_eq!(n2_peer.id, UID::new(1));
-        assert_eq!(n2_peer.tcp_port, Some(38912));
+        assert_eq!(n2_peer.tcp_port, Some(n1_tcp));
 
         relay_handle.abort();
     }
 
     #[tokio::test]
     async fn test_skip_relay_if_peer_exists_in_coordinator() {
-        let mut node = Node::<1024>::with_id(UID::new(10), 38811, 38812, NodeBackend::Cpu, 1)
+        let mut node = Node::<1024>::with_id(UID::new(10), 0, 0, NodeBackend::Cpu, 1)
             .await
             .expect("Failed to initialize Node");
 
@@ -1179,6 +1249,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
             tcp_port: Some(38822),
+            quic_port: None,
         };
 
         // Manually insert known peer into node's coordinator
@@ -1208,3 +1279,111 @@ mod tests {
 }
 
 
+
+/// Serves requesters on behalf of a [`Node`]; see [`Node::server`].
+#[derive(Clone)]
+pub struct PeerServer {
+    id: UID,
+    scheduler: JobScheduler,
+    stats: Arc<NodeStats>,
+    blob_cache_bytes: usize,
+}
+
+impl PeerServer {
+    /// Serves one requester: executes every `WORK` / `WORKREF` (and legacy
+    /// `TASKDATA`) packet it sends, in order, and replies with `RESULT`,
+    /// `WORKERROR` or `CACHEMISS`. Returns when the requester disconnects.
+    /// Several connections can be served at once; they share the node's workers.
+    pub async fn serve(self, peer: PeerConnection) {
+        let peer_addr = peer.addr;
+        // Blobs this requester sent us, so later `WORKREF`s can leave them out.
+        let mut blobs = BlobStore::new(self.blob_cache_bytes);
+        loop {
+            let packet = match peer.recv().await {
+                Ok(p) => p,
+                Err(e) => {
+                    log::info!("Node {} stopped serving {}: {}", self.id, peer_addr, e);
+                    return;
+                }
+            };
+
+            // `elide`: WORK results leave out buffers the task did not change (the
+            // requester restores them); legacy TASKDATA results are always complete.
+            let (task_id, kind, work, elide, bytes_in) = match packet {
+                TcpPacket::WORK(WorkPacket { task_id, kind, data, .. }) => {
+                    let work = Work::from_bytes(kind, &data);
+                    if let Ok(w) = &work {
+                        blobs.remember(w);
+                    }
+                    (task_id, kind, work, true, data.len())
+                }
+                TcpPacket::WORKREF(WorkRefPacket { task_id, kind, refs, data, .. }) => {
+                    let work = Work::from_bytes(kind, &data).and_then(|mut w| {
+                        blobs.remember(&w); // blobs sent inline alongside the refs
+                        Ok(blobs.resolve(&mut w, &refs).map(|()| w))
+                    });
+                    let work = match work {
+                        Ok(Ok(w)) => Ok(w),
+                        Ok(Err(missing)) => {
+                            log::debug!("Node {} lacks {} blob(s) for '{}'", self.id, missing.len(), task_id);
+                            let miss = TcpPacket::CACHEMISS(CacheMissPacket { task_id, missing });
+                            if let Err(e) = peer.send(&miss).await {
+                                log::info!("Node {} stopped serving {}: {}", self.id, peer_addr, e);
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(e) => Err(e),
+                    };
+                    (task_id, kind, work, true, data.len())
+                }
+                TcpPacket::TASKDATA(TaskDataPacket { task_id, kernel_data, .. }) => {
+                    let kind = struum_types::network::WorkKind::Gpu;
+                    (task_id, kind, Work::from_bytes(kind, &kernel_data), false, kernel_data.len())
+                }
+                other => {
+                    log::warn!("Node {} ignoring unexpected packet from {}: {:?}", self.id, peer_addr, other);
+                    continue;
+                }
+            };
+
+            log::info!("Node {} running {:?} task '{}' from {}", self.id, kind, task_id, peer_addr);
+            let started = std::time::Instant::now();
+            self.stats.begin_serving();
+            let result = match work {
+                Ok(work) => {
+                    let original = elide.then(|| work.clone());
+                    self.scheduler.run(work).await.map(|mut done| {
+                        if let Some(original) = &original {
+                            done.elide_unchanged(original);
+                        }
+                        done
+                    })
+                }
+                Err(e) => Err(e),
+            };
+
+            let busy = started.elapsed();
+            let reply = match result.and_then(|w| w.to_bytes()) {
+                Ok(bytes) => {
+                    self.stats.served(peer_addr, true, bytes_in as u64, bytes.len() as u64, busy);
+                    log::info!("Node {} finished '{}' in {:?}", self.id, task_id, started.elapsed());
+                    TcpPacket::RESULT(ResultPacket::new(task_id, self.id, bytes))
+                }
+                Err(e) => {
+                    self.stats.served(peer_addr, false, bytes_in as u64, 0, busy);
+                    log::error!("Node {} failed '{}': {}", self.id, task_id, e);
+                    TcpPacket::WORKERROR(WorkErrorPacket {
+                        task_id,
+                        sender_id: self.id,
+                        message: e.to_string(),
+                    })
+                }
+            };
+            if let Err(e) = peer.send(&reply).await {
+                log::info!("Node {} stopped serving {}: {}", self.id, peer_addr, e);
+                return;
+            }
+        }
+    }
+}

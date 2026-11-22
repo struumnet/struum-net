@@ -12,6 +12,7 @@ use struum_types::{
 /// Because `Node` maintains its own independent network map and coordination methods,
 /// `Coordinator` provides a high-level coordination interface atop `Node`.
 pub struct Coordinator<const BUF_SIZE: usize> {
+    /// The node doing the actual networking; also reachable through `Deref`.
     pub node: Node<BUF_SIZE>,
 }
 
@@ -76,6 +77,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::OpenGL),
             tcp_port: Some(38012),
+            quic_port: None,
         };
         let node2 = NodeDetails {
             id: UID::new(2),
@@ -83,6 +85,7 @@ mod tests {
             role: NodeRole::NODE,
             backend: Some(NodeBackend::Cpu),
             tcp_port: Some(38022),
+            quic_port: None,
         };
 
         coordinator.register_node(node1.clone());

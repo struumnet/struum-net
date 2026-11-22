@@ -5,6 +5,7 @@ edition = "2024"
 description = "CPU tasks for struum: WebAssembly modules executed with wasmtime"
 
 [dependencies]
+serde_bytes = { workspace = true }
 struum_types = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }

@@ -1,4 +1,7 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CString;
+use std::rc::Rc;
 use struum_types::StruumError;
 
 #[derive(Debug)]
@@ -108,6 +111,51 @@ impl Shader {
 
             Ok(program)
         }
+    }
+}
+
+/// Compiled programs of the GL context on this thread, by adapted source.
+struct ProgramCache(HashMap<String, Rc<Shader>>);
+
+/// Programs still cached at thread exit are left to the context teardown:
+/// deleting them here could run after the thread's context is gone.
+impl Drop for ProgramCache {
+    fn drop(&mut self) {
+        for (_, shader) in self.0.drain() {
+            std::mem::forget(shader);
+        }
+    }
+}
+
+const PROGRAM_CACHE_LIMIT: usize = 64;
+
+thread_local! {
+    static PROGRAMS: RefCell<ProgramCache> = RefCell::new(ProgramCache(HashMap::new()));
+}
+
+impl Shader {
+    /// Returns the program for `src`, compiling it only the first time it is seen
+    /// on this thread (sharded GPU jobs send the same kernel over and over).
+    pub(crate) fn cached(src: &str) -> Result<Rc<Shader>, StruumError> {
+        if let Some(hit) = PROGRAMS.with(|c| c.borrow().0.get(src).cloned()) {
+            return Ok(hit);
+        }
+        let shader = Rc::new(Shader::new(src)?);
+        PROGRAMS.with(|c| {
+            let mut cache = c.borrow_mut();
+            if cache.0.len() >= PROGRAM_CACHE_LIMIT {
+                // The context is current here, so dropping deletes the programs properly.
+                cache.0.clear();
+            }
+            cache.0.insert(src.to_string(), shader.clone());
+        });
+        Ok(shader)
+    }
+
+    /// Number of programs cached on this thread.
+    #[cfg(test)]
+    pub(crate) fn cached_count() -> usize {
+        PROGRAMS.with(|c| c.borrow().0.len())
     }
 }
 
